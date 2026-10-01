@@ -30,6 +30,15 @@ from app.models.misc import (
     CrawledDoc,
     UploadedDoc,
 )
+from app.models.quant import (
+    Company,
+    CompanySectorSnapshot,
+    FinancialFact,
+    FinancialMetric,
+    MarketPrice,
+    ValuationMetric,
+    FactorScore,
+)
 from app.models.reference import (
     PersonalCbStat,
     CorporateCbStat,
@@ -77,4 +86,11 @@ __all__ = [
     "BankProduct",
     "FundProduct",
     "DataCache",
+    "Company",
+    "CompanySectorSnapshot",
+    "FinancialFact",
+    "FinancialMetric",
+    "MarketPrice",
+    "ValuationMetric",
+    "FactorScore",
 ]

@@ -13,7 +13,7 @@ from app.database.postgres import connect_postgres, close_postgres
 from app.config import settings
 from app.database.neo4j import connect_neo4j, close_neo4j, ensure_graph_schema
 from app.lib.redis_cache import connect_redis, close_redis
-from app.routes import auth, health, chat, stocks, library, admin, system, quant, ml, macro, documents, notification, graph, conversations, tasks, ingest, paper, openapi, lean
+from app.routes import auth, health, chat, stocks, library, admin, system, quant, financials, ml, macro, documents, notification, graph, conversations, tasks, ingest, paper, openapi, lean
 from app.services.graph_service import seed_graph
 from app.services.sync_scheduler import start_sync_scheduler, stop_sync_scheduler
 
@@ -80,6 +80,7 @@ app.include_router(library.router)
 app.include_router(admin.router)
 app.include_router(system.router)
 app.include_router(quant.router)
+app.include_router(financials.router)
 app.include_router(ml.router)
 app.include_router(macro.router)
 app.include_router(documents.router)
