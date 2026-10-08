@@ -88,7 +88,7 @@
 | **크롤링** | GitHub docs (python-quant) 크롤링 → Qdrant RAG. URL 직접 크롤링 지원 |
 | **직접매매** | 가상 포트폴리오 관리, 매수/매도 주문, 키움증권·토스증권 API Mockup |
 | **모의투자** | (stock-coin-trade 이식) 공유 현금 1억원 모의계좌 — 국내주식 실시간 시세 모의주문·미리보기·계좌 리셋, Upbit KRW 마켓 코인 모의매매(국내 거래소 가격 비교·거래대금 랭킹), 대체자산(선물·옵션·파생 ETN·금·은·부동산 지분) 모의주문, 외부 시스템용 Open API 키 발급(`/openapi/v1`), Alpaca Paper 읽기 전용 연결 테스트 |
-| **퀀트자동매매** | RSI·SMA·볼린저밴드 시그널, 10분 주기 Agentic AI 자동매매 Mockup, 10년 백테스트, **QuantConnect LEAN 백테스트**(domain-rag-lab 이식: Yahoo 일봉 → LEAN Docker 실행, 매수후보유·MA교차·DCA·모멘텀 전략), **위험관리**(중복 주문 방지 쿨다운·일손실 한도·종목 비중 한도·일 주문 수·비상 정지 스위치) |
+| **퀀트자동매매** | RSI·SMA·볼린저밴드 시그널, 3분 주기 Agentic AI 자동매매(공격 모드), 10년 백테스트, **QuantConnect LEAN 백테스트**(domain-rag-lab 이식: Yahoo 일봉 → LEAN Docker 실행, 매수후보유·MA교차·DCA·모멘텀 전략), **위험관리**(중복 주문 방지 쿨다운·일손실 한도·종목 비중 한도·일 주문 수·비상 정지 스위치) |
 | **리밸런싱 엔진** | 목표 비중 플랜 + 3가지 트리거(시간: 월/분기/연 · 이탈률: 허용 %p 초과 · 현금흐름: 입금/출금/배당) → 매도→매수 주문 산출·모의 체결(`source=REBALANCE`), 자동 체결/제안 승인 모드, Celery Beat 1시간 점검 (`/api/rebalance/*`) |
 | **XAI (설명 가능한 AI)** | LightGBM TreeSHAP(`pred_contrib`) 기여도로 매수/관망/매도 판단 근거를 자연어로 설명 (`/api/ml/explain`, 로보 추천 종목·스크리닝·성과 검증 화면) |
 | **차트 패턴·멀티타임프레임** | 캔들 패턴(해머·장악형·샛별형 등)·피벗 지지/저항선·돌파/골든크로스 탐지, 60분봉·일봉·주봉 종합 신호 + 신뢰도 (`/api/stocks/patterns`, `/api/stocks/mtf-signal`) |
@@ -108,7 +108,7 @@
 | LLM / 임베딩 | Ollama (`llama3.1` / `nomic-embed-text`) |
 | 벡터 DB | Qdrant |
 | 사용자 인증 DB | MongoDB (motor async driver) |
-| 세션 | Redis (`redis.asyncio`) + HTTP-only 쿠키 |
+| 세션 | Redis (`redis.asyncio`) + HTTP-only 쿠키, 슬라이딩 만료(활동 시 서버 TTL·브라우저 쿠키 만료 동시 연장) |
 | 관계형 / 시계열 | aiosqlite (CB 통계, 금융상품, 포트폴리오, 주문) |
 | 외부 HTTP | httpx (async) – Yahoo Finance, Ollama API |
 | HTML 파싱 | BeautifulSoup4 |
@@ -251,6 +251,33 @@ docker run --rm -v "$PWD/tests:/app/tests:ro" -v "$PWD/pytest.ini:/app/pytest.in
 
 GitHub Actions `Unit Tests` 워크플로가 push/PR마다 실행되며, `Deploy to fund-web EC2`는 테스트 통과 후에만 배포합니다.
 
+### EC2 배포 (GitHub Actions → docker compose)
+
+`main` 에 push 되면 [.github/workflows/deploy.yml](.github/workflows/deploy.yml) 이 이 repo 를 EC2 로 rsync 하고
+`docker compose up -d --build` 로 컨테이너를 재빌드·재기동합니다. `.env` · `data/` · Docker 볼륨은 서버 것을 그대로 유지합니다.
+
+| 구분 | 이름 | 설명 |
+|---|---|---|
+| Secret | `FUND_WEB_SSH_KEY` | EC2 접속용 개인키 (PEM 파일 전문) |
+| Variable | `FUND_WEB_HOST` | EC2 퍼블릭 IP 또는 DNS |
+| Variable | `FUND_WEB_USER` | SSH 사용자 (예: `ubuntu`) |
+| Variable | `FUND_WEB_APP_DIR` | (선택) 서버 배포 경로. 기본 `/home/<USER>/lumina-invest` |
+| Variable | `FUND_WEB_COMPOSE_FILE` | (선택) compose 파일 목록(콜론 구분). 기본 `docker-compose.yml`, 운영은 `docker-compose.yml:compose.fd.yml` |
+| Variable | `FUND_WEB_DOMAIN` | (선택) 설정 시 `https://<DOMAIN>/api/health` 도 추가 확인 |
+
+서버 사전 준비 (최초 1회):
+
+```bash
+# Docker Engine + Compose v2 설치 (Ubuntu)
+curl -fsSL https://get.docker.com | sudo sh
+# 배포 경로와 .env 준비 — .env 는 git 에 없으므로 서버에서 직접 작성
+mkdir -p ~/lumina-invest && cd ~/lumina-invest
+cp /path/to/.env.example .env && vi .env
+```
+
+`shared-net` 네트워크는 워크플로가 없으면 자동 생성합니다. 보안 그룹은 GitHub Actions 러너에서 22번 포트 접속이 가능해야 하고,
+앱 포트(8966)는 리버스 프록시 또는 직접 노출 여부에 맞춰 열어 줍니다.
+
 ## 로컬 실행 가이드
 
 ### 사전 요구사항
@@ -260,11 +287,14 @@ GitHub Actions `Unit Tests` 워크플로가 push/PR마다 실행되며, `Deploy 
 ### 1. 인프라 기동
 
 ```bash
-# Ollama 모델 포함 전체 기동
+# Ollama(qwen2.5:1.5b + nomic-embed-text) 포함 전체 기동
 docker compose up -d
 
-# 모델 준비 대기 (약 1~5분)
+# 모델 준비 대기 (약 1~5분, 이미 받아둔 모델이면 즉시 종료)
 docker compose logs -f model-pull
+
+# 다른 모델을 쓰려면: COMPOSE_LLM_MODEL=llama3.1 docker compose up -d
+# 호스트 Ollama 를 쓰려면: COMPOSE_OLLAMA_URL=http://host.docker.internal:11434 docker compose up -d app
 ```
 
 ### 2. Python 앱 로컬 실행
@@ -332,6 +362,25 @@ docker compose run --rm ingest
 | `TRADINGVIEW_ALLOWED_IPS` | TradingView 공식 4개 IP | 쉼표 구분 허용 IP |
 | `TRADINGVIEW_RATE_LIMIT_MAX` | `30` | API 키당 분당 Webhook 알림 수 |
 | `PUBLIC_BASE_URL` | (빈 값) | Webhook URL 안내에 쓰는 외부 공개 주소 |
+| `SESSION_TTL` | `2592000` (30일) | 로그인 세션 유효 기간(초). 슬라이딩 만료라 **마지막 활동**으로부터 이 시간이 지나야 로그아웃된다 |
+| `SESSION_REFRESH_INTERVAL` | `300` | 슬라이딩 갱신 최소 간격(초). 이 간격마다 1회만 Redis `EXPIRE` + 세션 쿠키 재발급(`Set-Cookie`)을 수행한다 |
+| `COOKIE_SECURE` / `COOKIE_SAMESITE` | `false` / `lax` | 세션 쿠키 속성. HTTPS 운영(Caddy 뒤)에서는 `COOKIE_SECURE=true` |
+| `JWT_REFRESH_TTL` | `604800` (7일) | API 클라이언트용 리프레시 토큰 수명. `/api/auth/token/refresh` 가 새 리프레시 토큰도 함께 돌려주므로(슬라이딩) 활동 중인 클라이언트는 재로그인이 필요 없다 |
+
+#### 로보 어드바이저 채팅 답변 엔진 선택 (`/app.html#agent-chat` 우측 상단)
+
+| 모드 | 동작 | 요청 필드 |
+|---|---|---|
+| Local Ollama 연동 사용 | 서버 `LLM_PROVIDER` 설정의 LLM 으로 LangGraph 에이전트 실행 (기본) | `llm_mode=ollama` |
+| OpenAI API Key 입력으로 사용 | 선택 시 나타나는 입력창의 키로 OpenAI Chat Completions 호출. 키는 브라우저 `localStorage` 에만 보관되고 요청 본문으로만 전달되며 서버에 저장·로그되지 않는다. 모델은 `OPENAI_MODEL` | `llm_mode=openai`, `openai_api_key`, `openai_model`(선택) |
+| 순수 RAG 청크 사용 | LLM 호출 없이 Qdrant 유사도 검색 결과(청크·출처·점수)를 그대로 반환 | `llm_mode=rag` |
+
+#### 로그인 세션 유지 동작
+
+- 브라우저: 로그인 시 `fin_session` 쿠키(`max_age=SESSION_TTL`)를 발급한다. 이후 인증된 요청이 들어오면 `SESSION_REFRESH_INTERVAL` 마다 Redis TTL 을 `SESSION_TTL` 로 되돌리고, 같은 응답에 쿠키를 다시 실어 브라우저 쪽 만료도 함께 연장한다 (`app/lib/session.py` 의 `SessionCookieRefreshMiddleware`). 브라우저를 닫았다 다시 열어도 `/`, `/login.html` 은 세션이 살아 있으면 바로 `/app.html` 로 보낸다.
+- 세션 만료 뒤 API 가 401 을 돌려주면 프런트(`public/js/common.js`)가 `/login.html?next=<원래 경로>` 로 보내고, 로그인 후 원래 화면으로 복귀한다.
+- Redis 는 `docker-compose.yml` 에서 AOF(`--appendonly yes`)로 기동하므로 컨테이너 재시작/재배포 후에도 세션이 남는다. Redis 가 잠시 내려가면 인증 요청은 500 이 아니라 503 을 돌려주고, 복구되면 재로그인 없이 이어서 동작한다.
+- JWT 블랙리스트 키는 토큰 전체의 SHA-256 이다 (과거 "토큰 앞 32자" 방식은 JWT 헤더가 모든 토큰에서 같아 토큰 하나를 폐기하면 전체 토큰이 폐기되는 버그가 있었다).
 
 자동매매는 인프로세스 루프가 아니라 **DB 플래그(`broker_settings.quant_auto_enabled`) + Celery Beat 10분 태스크(`quant.auto_trade_cycle`)**로 실행되므로 `celery-beat`, `celery-worker` 컨테이너가 반드시 떠 있어야 합니다. 사이클 로그는 `data_cache`에 공유 저장됩니다.
 
@@ -902,3 +951,12 @@ AI의 Vector DB는 이 수많은 특징들을 가지고 무엇을 할까요? 핵
 인간은 공간의 축(X, Y, Z)으로 차원을 이해하지만, AI의 Vector DB는 **데이터가 가진 '특징의 개수'**로 차원을 이해합니다. 우리가 수천 개의 단어로 어떤 개념을 세밀하게 설명하듯, AI는 수천 개의 숫자로 이루어진 벡터로 개념을 정교하게 인지하는 것이죠.
 
 > 참고: 이 프로젝트의 Qdrant 컬렉션(`fin_chunks`)은 `nomic-embed-text` 임베딩 모델을 사용해 `VectorParams(size=768, distance=Distance.COSINE)`로 768차원 벡터를 저장합니다. 즉 각 금융 문서 청크가 768개의 특징 값으로 표현되며, 코사인 유사도로 의미가 가까운 문서를 검색하는 것입니다.
+
+
+## KIS 자동매매 연동 (3-repo)
+
+자동매매의 **최초 트리거는 이 웹앱의 종목 선정 화면**이다. Celery 10분 사이클이 시그널·위험관리를 거쳐 stock-coin-trade 게이트웨이로 KIS 주문을 내고, 2분 주기 `quant.confirm_fills` 가 체결을 확인한다.
+- 진행 상태·인수인계: [todo.md](todo.md) — 특히 6절 "작업 보고(AI 에이전트 인수인계용)"
+- 저장소 간 API 계약: [docs/contracts/kis-autotrade-api.md](docs/contracts/kis-autotrade-api.md) (세 저장소 동일 사본)
+- 게이트웨이 설정: `STOCK_COIN_TRADE_BASE_URL`, `STOCK_COIN_TRADE_API_KEY`, `STOCK_COIN_TRADE_KIS_ENVIRONMENT=paper|real` (app/config.py)
+- 테스트: `.venv/bin/python -m pytest tests/test_live_order_gateway_path.py tests/test_stock_coin_trade_gateway.py tests/test_strategy_loader.py tests/test_strategy_spec_apply.py tests/test_risk_guard.py tests/test_session_auth.py -q`

@@ -1,0 +1,114 @@
+services:
+  postgres:
+    ports: !override []
+
+  redis:
+    ports: !override []
+
+  neo4j:
+    ports: !override []
+    environment:
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 1g
+      NEO4J_server_memory_pagecache_size: 512m
+
+  app:
+    image: lumina-invest-app:fd
+    ports: !override []
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      QUANT_AGGRESSIVE_MODE: ${QUANT_AGGRESSIVE_MODE:-true}          # 5분봉 공격 모드 (2026-10-06). .env 로 끌 수 있다
+      KIS_PAPER_BATCH_ENABLED: ${KIS_PAPER_BATCH_ENABLED:-true}      # 로그인 무관 KIS 모의투자 배치. .env 로 끌 수 있다
+      PUBLIC_BASE_URL: https://fd.edumgt.co.kr
+      TRUST_PROXY: "true"
+      COOKIE_SECURE: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      ollama:
+        condition: service_started
+
+  ingest:
+    image: lumina-invest-app:fd
+    environment:
+      QDRANT_URL: http://qdrant:6333
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      ollama:
+        condition: service_started
+
+  celery-worker:
+    image: lumina-invest-app:fd
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      QUANT_AGGRESSIVE_MODE: ${QUANT_AGGRESSIVE_MODE:-true}          # 5분봉 공격 모드 (2026-10-06). .env 로 끌 수 있다
+      KIS_PAPER_BATCH_ENABLED: ${KIS_PAPER_BATCH_ENABLED:-true}      # 로그인 무관 KIS 모의투자 배치. .env 로 끌 수 있다
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      ollama:
+        condition: service_started
+
+  celery-beat:
+    image: lumina-invest-app:fd
+    environment:
+      QUANT_AGGRESSIVE_MODE: ${QUANT_AGGRESSIVE_MODE:-true}          # 5분봉 공격 모드 (2026-10-06). .env 로 끌 수 있다
+      KIS_PAPER_BATCH_ENABLED: ${KIS_PAPER_BATCH_ENABLED:-true}      # 로그인 무관 KIS 모의투자 배치. .env 로 끌 수 있다
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - shared-net
+
+  # unhealthy 라벨(autoheal=true) 컨테이너를 자동 재시작 — celery-beat/worker 가 조용히 멈추는 사고 대비
+  autoheal:
+    image: willfarrell/autoheal:latest
+    restart: unless-stopped
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+      AUTOHEAL_INTERVAL: 30
+      AUTOHEAL_START_PERIOD: 300
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - shared-net
+
+  proxy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infra/fd-edumgt/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - shared-net
+    depends_on:
+      - app
+
+volumes:
+  qdrant_data:
+  caddy_data:
+  caddy_config:

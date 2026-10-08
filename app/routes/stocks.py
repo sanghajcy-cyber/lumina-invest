@@ -7,7 +7,8 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database.postgres import get_pg_session
-from app.models import Portfolio, Order, BrokerSettings, CustomIndicator, QuantVirtualAccount, PORTFOLIO_BOOK_PAPER, PORTFOLIO_BOOK_QUANT
+from app.models.base import SYSTEM_USER_ID
+from app.models import Portfolio, Order, BrokerSettings, CustomIndicator, QuantVirtualAccount, LiveOrder, PORTFOLIO_BOOK_PAPER, PORTFOLIO_BOOK_QUANT
 from app.lib.session import get_current_user
 from app.services.stock import (
     get_quote, get_candles, get_market_summary,
@@ -16,6 +17,10 @@ from app.services.stock import (
 from app.services.krx_companies import search_companies
 from app.services import auto_trade
 from app.services import risk_guard
+from app.services import strategy_loader
+from app.services.brokers import stock_coin_trade_gateway
+from app.services import kis_credentials
+from app.services import kis_quickstart
 from app.services.quant_pipeline import backtest_custom_indicator
 from app.services.investment_research import backtest_strategy, screen_pattern
 from app.services.brokers.factory import get_broker_client
@@ -26,6 +31,7 @@ from app.services import paper_trading
 from app.services.data_cache import cache_get, cache_set
 from app.services.sync_scheduler import KEY_MARKET_INDICES
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
 DEFAULT_BROKER = "mock"
 
@@ -144,16 +150,38 @@ async def stock_fundamentals(symbol: str = Query(..., description="예: 005930.K
     return data
 
 
+@router.get("/stocks/sectors")
+async def stock_sectors(force: bool = Query(False, description="캐시 무시하고 재계산")):
+    """섹터별 투자 인디케이터 — 밸류에이션·수익성·성장·안정성·가격모멘텀·시장폭 + 판단 근거.
+
+    QUANT_STOCKS 유니버스를 섹터로 묶어 실제 펀더멘털·일봉에서 계산한다(1시간 캐시).
+    """
+    from app.services import sector_indicators
+    try:
+        return await sector_indicators.sector_overview(force=force)
+    except Exception as exc:
+        logger.exception("섹터 인디케이터 계산 실패")
+        raise HTTPException(502, f"섹터 지표 계산 실패: {exc}") from exc
+
+
 @router.get("/stocks/signals")
 async def stock_signals(
     signal: str = Query("all", description="all | buy | sell"),
     model: str = Query("lightgbm", description="lightgbm | rsi | ma | bollinger"),
     min_confidence: int = Query(65, ge=0, le=100),
+    symbols: str | None = Query(None, description="쉼표 구분 종목 코드. 주면 그 종목만(화면의 1종목씩 진행용)"),
 ):
-    """선택한 패턴 모델을 적용한 대표 종목 스크리닝."""
+    """선택한 패턴 모델을 적용한 대표 종목 스크리닝. `symbols` 로 부분 집합만 계산할 수 있다."""
+    universe = QUANT_STOCKS
+    if symbols:
+        wanted = {x.strip().upper() for x in symbols.split(",") if x.strip()}
+        universe = [s for s in QUANT_STOCKS if s["symbol"].upper() in wanted]
     rows = []
-    for stock in QUANT_STOCKS:
+    for stock in universe:
         candles = (await get_candles(stock["symbol"], period="1y", interval="1d")).get("candles", [])
+        if not candles:   # KIS·Yahoo 모두 빈 응답(예: 012510.KQ Yahoo 폴백) → 이 종목만 건너뜀 (이전엔 KeyError → 500)
+            logging.getLogger(__name__).warning("스크리닝 캔들 없음 %s", stock["symbol"])
+            continue
         result = screen_pattern(candles, model)
         if result.get("error"):
             continue
@@ -349,6 +377,9 @@ class BrokerSettingsBody(BaseModel):
     paper: bool = Field(default=True, alias="paper_trading")
 
 
+QUANT_MAX_SELECTED_SYMBOLS = 10
+
+
 class QuantSettingsBody(BaseModel):
     """퀀트 자동매매 설정 저장용 입력 모델."""
 
@@ -365,6 +396,9 @@ class QuantSettingsBody(BaseModel):
     per_trade_budget: float = Field(default=1_000_000, ge=10_000, le=10_000_000)
     buy_ratio: float = Field(default=1.0, ge=0.1, le=1.0)
     sell_ratio: float = Field(default=0.5, ge=0.1, le=1.0)
+    # domain-rag-lab 합격 전략 (비우면 기존 규칙)
+    strategy_id: str = Field(default="", max_length=40)
+    strategy_version: int = Field(default=0, ge=0)
     # 위험관리
     risk_daily_loss_limit_pct: float = Field(default=3.0, ge=0, le=50, description="0이면 비활성")
     risk_max_position_pct: float = Field(default=30.0, ge=0, le=100, description="0이면 비활성")
@@ -386,6 +420,40 @@ async def _get_or_create_broker_settings_row(db: AsyncSession, user_id: uuid.UUI
     return row
 
 
+def _apply_credentials(row: BrokerSettings, broker: str, app_key: str, app_secret: str, account_no: str) -> None:
+    """서버 관리 증권사(KIS)는 사용자가 보낸 키·계좌를 저장하지 않는다 — Secrets Manager 값을 쓴다."""
+    if kis_credentials.is_managed(broker):
+        row.app_key = row.app_secret = row.account_no = ""
+        return
+    row.app_key = app_key
+    row.app_secret = app_secret
+    row.account_no = account_no
+
+
+async def _resolve_credentials(row: BrokerSettings | None) -> tuple[str, str, str, str, bool]:
+    """(broker, app_key, app_secret, account_no, paper). KIS 는 Secrets Manager, 그 외는 DB 행."""
+    if not row:
+        return "mock", "", "", "", True
+    broker = (row.broker or DEFAULT_BROKER).strip().lower()
+    if kis_credentials.is_managed(broker):
+        creds = await kis_credentials.get_credentials()
+        if creds is None:
+            return broker, "", "", "", True
+        return broker, creds.app_key, creds.app_secret, creds.account_no, creds.paper
+    return broker, row.app_key, row.app_secret, row.account_no, row.paper
+
+
+async def _connection_view(row: BrokerSettings | None) -> dict:
+    """화면 표시용 연동 정보. 키 원문은 포함하지 않는다."""
+    if not row:
+        return {"connected": False, "app_key": "", "account_no": "", "kis_managed": None}
+    if kis_credentials.is_managed(row.broker):
+        st = await kis_credentials.get_status()
+        return {"connected": st["configured"], "app_key": "", "account_no": st["account_masked"], "kis_managed": st}
+    return {"connected": bool(row.app_key), "app_key": row.app_key[:4] + "****" if row.app_key else "",
+            "account_no": row.account_no, "kis_managed": None}
+
+
 @router.get("/broker/catalog")
 async def broker_catalog():
     return {"brokers": get_broker_catalog()}
@@ -403,12 +471,11 @@ async def save_broker_settings(
 
     row = await _get_or_create_broker_settings_row(db, _uid(user["id"]))
     row.broker = broker
-    row.app_key = body.app_key
-    row.app_secret = body.app_secret
-    row.account_no = body.account_no
+    _apply_credentials(row, broker, body.app_key, body.app_secret, body.account_no)
     row.paper = body.paper
     await db.commit()
-    await audit(user["id"], "", "broker.settings.save", {"broker": broker, "paper": body.paper})
+    await audit(user["id"], "", "broker.settings.save", {"broker": broker, "paper": body.paper,
+                                                          "managed": kis_credentials.is_managed(broker)})
     return {"ok": True}
 
 
@@ -427,15 +494,60 @@ async def get_broker_settings(
             "paper": True,
             "brokers": catalog,
         }
-    masked = row.app_key[:4] + "****" if row.app_key else ""
+    view = await _connection_view(row)
     return {
         "broker":     row.broker,
-        "connected":  bool(row.app_key),
-        "app_key":    masked,
-        "account_no": row.account_no,
+        "connected":  view["connected"],
+        "app_key":    view["app_key"],
+        "account_no": view["account_no"],
+        "kis_managed": view["kis_managed"],
         "paper":      row.paper,
         "brokers": catalog,
     }
+
+
+def _live_gateway_info() -> dict:
+    """종목 선정 화면 표시용: live 모드 주문이 어디로 나가는지."""
+    if stock_coin_trade_gateway.is_configured():
+        return {"configured": True, "via": "stock-coin-trade", "environment": stock_coin_trade_gateway.environment(),
+                "order_type": stock_coin_trade_gateway.default_order_type()}
+    return {"configured": False, "via": "legacy-direct", "environment": "real", "order_type": "LIMIT"}
+
+
+@router.get("/quant/strategies")
+async def list_quant_strategies(user=Depends(get_current_user)):
+    """domain-rag-lab 백테스트 합격 전략 목록 (종목 선정 화면 드롭다운)."""
+    return {"configured": strategy_loader.is_configured(), "strategies": await strategy_loader.list_strategies()}
+
+
+@router.get("/quant/live-orders")
+async def list_live_orders(
+    limit: int = Query(50, ge=1, le=200),
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_pg_session),
+):
+    """게이트웨이 경유 KIS 실주문 추적 목록 (quant.confirm_fills 가 갱신).
+    KIS 모의투자 배치가 실행 중이면 시스템 사용자(배치) 주문도 함께 반환한다(owner=batch)."""
+    from app.services import kis_batch
+    me = _uid(user["id"])
+    owners = [me]
+    batch = await kis_batch.system_status(db)
+    if batch.get("running"):
+        owners.append(SYSTEM_USER_ID)
+    result = await db.execute(
+        select(LiveOrder).where(LiveOrder.user_id.in_(owners)).order_by(LiveOrder.created_at.desc()).limit(limit)
+    )
+    rows = result.scalars().all()
+    return {"gateway": _live_gateway_info(), "batch": batch, "orders": [
+        {
+            "owner": "batch" if r.user_id == SYSTEM_USER_ID else "me",
+            "id": str(r.id), "client_order_id": r.client_order_id, "environment": r.environment, "symbol": r.symbol, "name": r.name,
+            "side": r.side, "order_type": r.order_type, "quantity": r.quantity, "price": r.price, "order_no": r.order_no,
+            "status": r.status, "filled_quantity": r.filled_quantity, "avg_filled_price": r.avg_filled_price,
+            "message": r.message, "created_at": r.created_at.isoformat() if r.created_at else None,
+            "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+        } for r in rows
+    ]}
 
 
 @router.get("/quant/settings")
@@ -452,19 +564,24 @@ async def get_quant_settings(
             "account_no": "", "paper": True, "symbol_source": "ai", "selected_symbols": [],
             "ai_top_n": 3, "per_trade_budget": 1_000_000.0, "buy_ratio": 1.0, "sell_ratio": 0.5,
             "risk": risk_guard.RiskLimits().to_dict(), "risk_halt_reason": "",
+            "strategy_id": "", "strategy_version": 0,
+            "live_gateway": _live_gateway_info(),
+            "kis_managed": None, "managed_brokers": sorted(kis_credentials.MANAGED_BROKERS),
             "brokers": catalog, "stocks": stocks,
         }
 
     mode = row.quant_mode if row.quant_mode in ("paper", "live") else ("live" if row.paper is False else "paper")
     source = row.quant_symbol_source if row.quant_symbol_source in ("ai", "manual") else "ai"
-    masked = row.app_key[:4] + "****" if row.app_key else ""
+    view = await _connection_view(row)
 
     return {
         "mode": mode,
         "broker": row.broker,
-        "connected": bool(row.app_key),
-        "app_key": masked,
-        "account_no": row.account_no,
+        "connected": view["connected"],
+        "app_key": view["app_key"],
+        "account_no": view["account_no"],
+        "kis_managed": view["kis_managed"],
+        "managed_brokers": sorted(kis_credentials.MANAGED_BROKERS),
         "paper": mode == "paper",
         "symbol_source": source,
         "selected_symbols": list(row.quant_selected_symbols or []),
@@ -474,6 +591,9 @@ async def get_quant_settings(
         "sell_ratio": row.quant_sell_ratio,
         "risk": risk_guard.RiskLimits.from_row(row).to_dict(),
         "risk_halt_reason": row.risk_halt_reason,
+        "strategy_id": row.quant_strategy_id or "",
+        "strategy_version": row.quant_strategy_version or 0,
+        "live_gateway": _live_gateway_info(),
         "brokers": catalog,
         "stocks": stocks,
     }
@@ -498,13 +618,19 @@ async def save_quant_settings(
         raise HTTPException(422, "symbol_source는 ai 또는 manual 이어야 합니다.")
 
     valid_symbols = {s["symbol"] for s in QUANT_STOCKS}
-    selected = [s for s in (body.selected_symbols or []) if s in valid_symbols]
+    requested = [str(s).strip() for s in (body.selected_symbols or []) if str(s).strip()]
+    invalid = [s for s in requested if s not in valid_symbols]
+    if invalid:
+        raise HTTPException(422, f"지원하지 않는 종목코드: {', '.join(invalid[:5])}")
+    if len(requested) > QUANT_MAX_SELECTED_SYMBOLS:
+        raise HTTPException(422, f"직접 선택 종목은 최대 {QUANT_MAX_SELECTED_SYMBOLS}개까지 가능합니다.")
+    if symbol_source == "manual" and not requested:
+        raise HTTPException(422, "직접 선택 모드에서는 종목을 1개 이상 선택하세요.")
+    selected = list(dict.fromkeys(requested))
 
     row = await _get_or_create_broker_settings_row(db, _uid(user["id"]))
     row.broker = broker
-    row.app_key = body.app_key
-    row.app_secret = body.app_secret
-    row.account_no = body.account_no
+    _apply_credentials(row, broker, body.app_key, body.app_secret, body.account_no)
     row.paper = mode == "paper"
     row.quant_mode = mode
     row.quant_symbol_source = symbol_source
@@ -513,6 +639,16 @@ async def save_quant_settings(
     row.quant_per_trade_budget = body.per_trade_budget
     row.quant_buy_ratio = body.buy_ratio
     row.quant_sell_ratio = body.sell_ratio
+    strategy_id = (body.strategy_id or "").strip().lower()
+    if strategy_id:
+        spec = await strategy_loader.get_strategy(strategy_id, body.strategy_version or None)
+        if spec is None:
+            raise HTTPException(422, f"domain-rag-lab 에 합격한 전략이 없습니다: {strategy_id}")
+        row.quant_strategy_id = strategy_id
+        row.quant_strategy_version = int(spec.get("version") or body.strategy_version or 0)
+    else:
+        row.quant_strategy_id = ""
+        row.quant_strategy_version = 0
     row.risk_daily_loss_limit_pct = body.risk_daily_loss_limit_pct
     row.risk_max_position_pct = body.risk_max_position_pct
     row.risk_max_orders_per_day = body.risk_max_orders_per_day
@@ -520,20 +656,22 @@ async def save_quant_settings(
     await db.commit()
     await audit(user["id"], "", "quant.settings.save", {
         "broker": broker, "mode": mode, "symbol_source": symbol_source,
+        "managed": kis_credentials.is_managed(broker),
     })
     return {"ok": True}
 
 
 async def _get_broker_client(user: dict, db: AsyncSession):
     row = await _get_broker_settings_row(db, _uid(user["id"]))
-    if not row:
-        return get_broker_client("mock")
-    return get_broker_client(
-        broker     = row.broker or "mock",
-        app_key    = row.app_key,
-        app_secret = row.app_secret,
-        paper      = row.paper,
-    )
+    broker, app_key, app_secret, _account_no, paper = await _resolve_credentials(row)
+    return get_broker_client(broker=broker, app_key=app_key, app_secret=app_secret, paper=paper)
+
+
+async def _get_broker_client_and_account(user: dict, db: AsyncSession):
+    """(client, broker, account_no). KIS 는 계좌번호도 Secrets Manager 값을 쓴다."""
+    row = await _get_broker_settings_row(db, _uid(user["id"]))
+    broker, app_key, app_secret, account_no, paper = await _resolve_credentials(row)
+    return get_broker_client(broker=broker, app_key=app_key, app_secret=app_secret, paper=paper), broker, account_no
 
 
 # ── 증권사 API 실시간 조회 ────────────────────────────────────────────
@@ -562,9 +700,7 @@ async def broker_balance(
     user=Depends(get_current_user),
     db: AsyncSession = Depends(get_pg_session),
 ):
-    client = await _get_broker_client(user, db)
-    row = await _get_broker_settings_row(db, _uid(user["id"]))
-    account_no = row.account_no if row else ""
+    client, _broker_name, account_no = await _get_broker_client_and_account(user, db)
     try:
         bal = await client.get_balance(account_no)
         return {
@@ -599,6 +735,45 @@ async def broker_ohlcv(
         raise HTTPException(502, f"증권사 API 오류: {e}")
 
 
+class ManualKisOrderBody(BaseModel):
+    """「기본 인디케이터 전략」 화면의 수동 KIS 모의투자 주문."""
+    symbol:   str
+    name:     str | None = None
+    side:     str = Field(pattern="^(buy|sell)$")
+    quantity: int = Field(ge=1, le=10_000)
+
+
+@router.post("/stocks/quant/manual-order")
+async def quant_manual_order(body: ManualKisOrderBody, user=Depends(get_current_user),
+                             db: AsyncSession = Depends(get_pg_session)):
+    """화면에서 직접 내는 KIS 모의투자 주문 — 자동매매와 같은 게이트웨이·추적 경로를 쓴다.
+
+    가격은 서버가 현재가로 정한다(클라이언트 값 불신). 실전 환경·비상정지는 422 로 막는다.
+    """
+    try:
+        return await auto_trade.place_manual_kis_order(
+            db, user["id"], body.symbol, body.name or body.symbol, body.side, body.quantity)
+    except auto_trade.ManualOrderBlocked as exc:
+        raise HTTPException(422, exc.message)
+
+
+@router.get("/stocks/quant/order-readiness")
+async def quant_order_readiness(user=Depends(get_current_user), db: AsyncSession = Depends(get_pg_session)):
+    """거래 버튼을 켜도 되는지 — KIS 연동·환경(모의/실전)·비상정지·장 운영시간."""
+    from app.services import kis_quickstart
+    from app.services.brokers import stock_coin_trade_gateway as gw
+    r = await kis_quickstart.readiness(db, uuid.UUID(user["id"]))
+    market_open = gw.is_krx_market_open()
+    blocked = (not r["connected"] and "not_connected") or \
+              (r["environment"] != "paper" and "real_environment") or \
+              (r["kill_switch"] and "kill_switch") or ""
+    return {"can_order": not blocked, "reason": blocked, "environment": r["environment"],
+            "route": r["route"], "route_detail": r["route_detail"], "connected": r["connected"],
+            "kill_switch": r["kill_switch"], "market_open": market_open,
+            "enforce_market_hours": gw.enforce_market_hours(),
+            "max_quantity": auto_trade.MANUAL_ORDER_MAX_QTY}
+
+
 class BrokerOrderBody(BaseModel):
     symbol:   str
     side:     str
@@ -612,10 +787,7 @@ async def broker_order(
     user=Depends(get_current_user),
     db: AsyncSession = Depends(get_pg_session),
 ):
-    client = await _get_broker_client(user, db)
-    row = await _get_broker_settings_row(db, _uid(user["id"]))
-    account_no = row.account_no if row else ""
-    broker_name = row.broker if row else "mock"
+    client, broker_name, account_no = await _get_broker_client_and_account(user, db)
 
     # ── 매수 주문 시 예수금 사전 확인 ──────────────────────────────────────
     if body.side == "buy":
@@ -701,7 +873,7 @@ async def stock_patterns(symbol: str = Query("005930.KS"), period: str = Query("
     result = pattern_summary(candles)
     if "error" in result:
         raise HTTPException(422, result["error"])
-    return {"symbol": symbol, **result}
+    return {"symbol": symbol, "candles": candles, **result}
 
 
 @router.get("/stocks/mtf-signal")
@@ -719,7 +891,7 @@ async def start_auto_trade(user=Depends(get_current_user), db: AsyncSession = De
     if row and row.risk_kill_switch:
         raise HTTPException(409, f"비상 정지 상태입니다. 해제 후 시작하세요. (사유: {row.risk_halt_reason or '수동 정지'})")
     started = await auto_trade.start_auto_trade(db, user["id"])
-    return {"ok": True, "started": started, "scheduler": "celery-beat (10분)"}
+    return {"ok": True, "started": started, "scheduler": f"celery-beat ({kis_quickstart.interval_min()}분)"}
 
 
 @router.post("/auto-trade/stop")
@@ -781,6 +953,23 @@ async def quant_kill_switch(body: KillSwitchBody, user=Depends(get_current_user)
     return {"ok": True, "kill_switch": row.risk_kill_switch, "auto_trade_stopped": stopped}
 
 
+# ── 통합 대시보드: KIS 모의투자 원클릭 ───────────────────────────────
+
+@router.get("/quant/kis/quickstart")
+async def kis_quickstart_readiness(user=Depends(get_current_user), db: AsyncSession = Depends(get_pg_session)):
+    """시작 가능 여부(연동·환경·비상정지)와 현재 자동매매 상태."""
+    return await kis_quickstart.readiness(db, _uid(user["id"]))
+
+
+@router.post("/quant/kis/quickstart")
+async def kis_quickstart_start(user=Depends(get_current_user), db: AsyncSession = Depends(get_pg_session)):
+    """KIS 모의투자(Testbed) 원클릭 시작: 설정 저장(AI 추천 · live · Testbed 권장 한도) + 자동매매 ON."""
+    try:
+        return await kis_quickstart.start(db, user["id"])
+    except kis_quickstart.QuickstartBlocked as e:
+        raise HTTPException(409, e.message)
+
+
 @router.post("/quant/auto/start")
 async def quant_auto_start(user=Depends(get_current_user), db: AsyncSession = Depends(get_pg_session)):
     """기존 프론트 호환 경로."""
@@ -800,29 +989,62 @@ async def quant_auto_stop(user=Depends(get_current_user), db: AsyncSession = Dep
 
 @router.get("/quant/auto/status")
 async def quant_auto_status(user=Depends(get_current_user), db: AsyncSession = Depends(get_pg_session)):
-    """모의 투자 의사결정 UI용 최근 사이클 결과."""
+    """모의 투자 의사결정 UI용 최근 사이클 결과.
+
+    KIS 모의투자 백그라운드 배치(kis_batch)가 실행 중이면 시스템 사용자의 사이클도 합쳐서 보여준다 —
+    배치 단독 실행으로 사용자 계정 자동매매가 꺼져 있어도 화면에서 거래가 보이도록. 배치 항목은 [배치] 로 표시.
+    """
+    from app.services import kis_batch
     status = await auto_trade.get_status(db, _uid(user["id"]))
+    sources = [("", status)]
+    batch = await kis_batch.system_status(db)
+    if batch.get("running"):
+        sources.append(("[배치] ", await auto_trade.get_status(db, SYSTEM_USER_ID)))
     logs, signals = [], []
-    for cycle in status.get("log", [])[-10:]:
-        for sig in cycle.get("signals", []):
-            action = sig.get("action", "관망")
-            signals.append({
-                **sig,
-                "signal": "BUY" if "매수" in action else "SELL" if "매도" in action else "HOLD",
-            })
-        account = cycle.get("account")
-        if account:
-            logs.append({
-                "time": cycle.get("time", ""),
-                "message": f"모의계좌 평가 {account.get('total_equity', 0):,.0f}원 / 손익 {account.get('pnl_pct', 0):+.2f}%",
-            })
-        for trade in cycle.get("trades", []):
-            logs.append({
-                "time": trade.get("time", cycle.get("time", "")),
-                "message": f"{trade.get('name', trade.get('symbol', ''))} {trade.get('action', '').upper()} "
-                           f"{trade.get('quantity', 0)}주 — {trade.get('reason', '')}",
-            })
-    return {"running": status["running"], "logs": logs[-50:], "signals": signals[-20:]}
+    for prefix, st in sources:
+        for cycle in st.get("log", [])[-10:]:
+            for sig in cycle.get("signals", []):
+                action = sig.get("action", "관망")
+                signals.append({
+                    **sig, "source": "batch" if prefix else "me", "cycle_time": cycle.get("time", ""),
+                    # NONE = 시장 데이터를 못 받아 판단하지 않은 종목. 관망(HOLD)과 구분해야 근거 없는 판단으로 보이지 않는다.
+                    "signal": "NONE" if sig.get("error") else
+                              "BUY" if "매수" in action else "SELL" if "매도" in action else "HOLD",
+                })
+            account = cycle.get("account")
+            if account:
+                logs.append({
+                    "time": cycle.get("time", ""),
+                    "message": f"{prefix}모의계좌 평가 {account.get('total_equity', 0):,.0f}원 / 손익 {account.get('pnl_pct', 0):+.2f}%",
+                })
+            ag = cycle.get("aggressive") or {}
+            for note in ag.get("notes", []):
+                logs.append({"time": cycle.get("time", ""), "message": f"{prefix}[공격 모드] {note}"})
+            for skip in (cycle.get("risk") or {}).get("skipped", []):
+                logs.append({"time": cycle.get("time", ""),
+                             "message": f"{prefix}[위험관리 생략] {skip.get('name', skip.get('symbol', ''))} {str(skip.get('side', '')).upper()} — {skip.get('reason', '')}"})
+            for trade in cycle.get("trades", []):
+                if trade.get("type") == "risk":
+                    continue   # 위 skipped 로 이미 표시
+                live = trade.get("live_order") or {}
+                live_txt = f" · 실주문 {live.get('status')}" + (f"({live.get('reason') or live.get('error')})" if live.get("reason") or live.get("error") else "") if live else ""
+                logs.append({
+                    "time": trade.get("time", cycle.get("time", "")),
+                    "message": f"{prefix}{trade.get('name', trade.get('symbol', ''))} {trade.get('action', '').upper()} "
+                               f"{trade.get('quantity', 0)}주 — {trade.get('reason', '')}{live_txt}",
+                })
+    logs.sort(key=lambda x: x.get("time") or "")
+    from app.services import reconciliation
+    try:
+        recon = await reconciliation.latest()
+    except Exception:
+        recon = None
+    if recon and recon.get("issues"):
+        for i in recon["issues"][:10]:
+            logs.append({"time": recon.get("checked_at", ""), "message": f"[정합성] {i['type']} {i.get('symbol', '')} — " +
+                         ", ".join(f"{k}={v}" for k, v in i.items() if k not in ("type", "symbol", "detail"))})
+    return {"running": status["running"] or bool(batch.get("running")), "me_running": status["running"],
+            "batch": batch, "reconcile": recon, "logs": logs[-90:], "signals": signals[-40:]}
 
 
 @router.get("/quant/pipeline")

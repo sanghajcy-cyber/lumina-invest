@@ -7,6 +7,8 @@
   <link rel="icon" href="/favicon.ico" />
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/apexcharts@3.49.2/dist/apexcharts.min.js"></script>
+  <script defer src="/js/vendor/ag-grid/ag-grid-community-36.2.0.min.js"></script>
+  <script defer src="/js/vendor/lightweight-charts/lightweight-charts-5.2.1.min.js"></script>
   <link rel="preconnect" href="https://cdn.jsdelivr.net" />
   <link rel="stylesheet" as="style" onload="this.rel='stylesheet'"
         href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css" />
@@ -22,7 +24,7 @@
 <!-- ══ GNB ══════════════════════════════════════════════════════════ -->
 <header id="gnb">
   <!-- 로고 -->
-  <a href="/" class="gnb-logo">
+  <a href="/app.html#dashboard" class="gnb-logo">
     <div class="gnb-logo-icon"><i class="fa-solid fa-chart-mixed"></i></div>
     <div class="gnb-logo-text">
       <strong>Lumina Invest</strong>
@@ -33,14 +35,7 @@
   <!-- GNB 탭 (스크롤 가능) -->
   <div class="gnb-tabs">
     <button class="gnb-item" data-gnb="agent"><i class="fa-solid fa-robot"></i> 로보 어드바이저</button>
-    <button class="gnb-item" data-gnb="crawl"><i class="fa-solid fa-spider"></i> 크롤링</button>
-    <button class="gnb-item" data-gnb="trading"><i class="fa-solid fa-chart-line"></i> 직접매매</button>
-    <button class="gnb-item" data-gnb="paper"><i class="fa-solid fa-graduation-cap"></i> 모의투자</button>
-    <button class="gnb-item" data-gnb="quant"><i class="fa-solid fa-bolt"></i> 퀀트자동매매</button>
-    <button class="gnb-item" data-gnb="us"><i class="fa-solid fa-flag-usa"></i> 미국주식</button>
     <button class="gnb-item" data-gnb="company"><i class="fa-solid fa-chart-pie"></i> 투자 인디케이터</button>
-    <button class="gnb-item" data-gnb="ml"><i class="fa-solid fa-microchip"></i> ML·딥러닝</button>
-    <button class="gnb-item" data-gnb="invest"><i class="fa-solid fa-magnifying-glass-dollar"></i> 투자분석</button>
   </div>
 
   <!-- 우측: 시세 + 사용자 -->
@@ -58,7 +53,7 @@
     <button id="logout-btn" class="btn-secondary" style="padding:6px 12px; font-size:14px;">
       <i class="fa-solid fa-arrow-right-from-bracket" style="margin-right:4px;"></i>로그아웃
     </button>
-    <!-- 더보기 (금융 지식·시스템 offcanvas) -->
+    <!-- 더보기 (2단계 메뉴 offcanvas) -->
     <button id="gnb-more-btn" class="btn-secondary" style="padding:6px 10px;" title="더보기" aria-label="더보기 메뉴">
       <i class="fa-solid fa-ellipsis-vertical"></i>
     </button>
@@ -69,17 +64,14 @@
   </div>
 </header>
 
-<!-- 더보기 offcanvas (금융 지식 / 시스템) -->
+<!-- 더보기 offcanvas (메뉴 그룹 / 세부 메뉴) -->
 <div id="gnb-offcanvas-backdrop"></div>
 <aside id="gnb-offcanvas">
   <div class="lnb-header">
     <div class="lnb-section-title">더보기</div>
     <button id="gnb-offcanvas-close" class="lnb-toggle" aria-label="닫기"><i class="fa-solid fa-xmark"></i></button>
   </div>
-  <nav class="lnb-nav">
-    <div class="lnb-item" data-gnb="finance"><i class="fa-solid fa-coins"></i><span>금융 지식</span></div>
-    <div class="lnb-item" data-gnb="sysadmin"><i class="fa-solid fa-gear"></i><span>시스템</span></div>
-  </nav>
+  <nav id="gnb-offcanvas-nav" class="lnb-nav" aria-label="더보기 메뉴"></nav>
 </aside>
 
 <!-- Toast는 common.js setToast()가 동적으로 생성 (#_toast_el) -->
@@ -103,6 +95,41 @@
     <main id="main-content">
       <div class="space-y-4">
 
+    <div class="view" data-view="dashboard">
+      <div class="overview-heading">
+        <div><p class="overview-eyebrow">LUMINA INVEST</p><h1>투자 대시보드</h1><p class="overview-note">로보 어드바이저와 투자 인디케이터의 기능 및 성과를 한눈에 확인하세요.</p></div>
+        <div><button id="overview-refresh" type="button" class="btn-secondary"><i class="fa-solid fa-rotate"></i> 새로고침</button><p id="overview-updated" class="overview-note" aria-live="polite"></p></div>
+      </div>
+      <section class="card overview-section mb-4" aria-labelledby="overview-kis-title" style="margin-bottom:16px;">
+        <div class="flex items-center justify-between gap-4 flex-wrap">
+          <div class="overview-section-heading" style="margin:0;"><i class="fa-solid fa-play"></i><div><h2 id="overview-kis-title">KIS 모의투자 (Testbed)</h2><p class="overview-note">AI 추천 종목 · 3분 자동매매(공격 모드) · 한국투자증권 모의투자 계좌로 주문. 자격증명은 서버(Secrets Manager)가 관리합니다.</p></div></div>
+          <div class="flex items-center gap-2">
+            <button id="overview-kis-start" type="button" class="btn-green" disabled><i class="fa-solid fa-play"></i> KIS 모의투자 시작</button>
+            <a class="btn-secondary text-xs" href="#settings">설정 보기</a>
+          </div>
+        </div>
+        <p id="overview-kis-status" class="overview-note mt-2" role="status" aria-live="polite">연동 상태를 확인하는 중입니다…</p>
+      </section>
+      <div class="overview-columns">
+        <section class="card overview-section" aria-labelledby="overview-robo-title">
+          <div class="overview-section-heading"><i class="fa-solid fa-robot"></i><div><h2 id="overview-robo-title">로보 어드바이저</h2><p class="overview-note">투자 상담부터 자산배분과 리밸런싱까지</p></div></div>
+          <h3>투자 사이트별 현재 투자액</h3><p class="overview-note">탭을 눌러 사이트별 계좌를 확인하세요. KIS 모의투자가 기본입니다.</p>
+          <div id="overview-account-tabs" class="overview-tabs" role="tablist" aria-label="투자 사이트"></div>
+          <div id="overview-account-panel" class="overview-metrics" role="tabpanel"><p class="overview-note" role="status">계좌를 불러오는 중입니다…</p></div>
+          <div id="overview-robo-metrics" class="overview-metrics hidden"></div>
+          <div id="overview-decision" class="overview-metrics"></div>
+          <h3>기능 바로가기</h3><div id="overview-robo-features" class="overview-features"></div>
+        </section>
+        <section class="card overview-section" aria-labelledby="overview-indicator-title">
+          <div class="overview-section-heading"><i class="fa-solid fa-chart-pie"></i><div><h2 id="overview-indicator-title">투자 인디케이터</h2><p class="overview-note">지표 개발부터 백테스트와 API 연동까지</p></div></div>
+          <h3>기본 전략 성능</h3><p class="overview-note">삼성전자 · 최근 1년 · RSI 역추세 · 수수료 10bp · 슬리피지 0bp<br>과거 데이터 백테스트 결과이며 내 계좌의 실현 수익률과 다릅니다.</p>
+          <div id="overview-indicator-metrics" class="overview-metrics"></div>
+          <div id="overview-saved" class="overview-metrics"></div>
+          <h3>기능 바로가기</h3><div id="overview-indicator-features" class="overview-features"></div>
+        </section>
+      </div>
+    </div>
+
     <!-- ══ 1. 로보 어드바이저 ══════════════════════════════════════ -->
     <!-- 1-1. AI 투자 상담 -->
     <div class="view" data-view="agent-chat">
@@ -112,7 +139,20 @@
             <h2 class="text-lg font-semibold">🤖 로보 어드바이저 AI 상담</h2>
             <p class="text-xs text-slate-400 mt-0.5">신용 리스크 · 금융상품 추천 · 퀀트 전략을 AI가 종합 분석하여 투자 자문을 제공합니다</p>
           </div>
-          <button id="clear-chat" class="btn-secondary text-xs">초기화</button>
+          <div class="chat-mode-bar">
+            <label class="chat-mode-label" for="chat-llm-mode"><i class="fa-solid fa-microchip"></i> 답변 엔진</label>
+            <select id="chat-llm-mode" class="input chat-mode-select" title="답변 생성 방식 선택">
+              <option value="ollama">Local Ollama 연동 사용</option>
+              <option value="openai">OpenAI API Key 입력으로 사용</option>
+              <option value="rag">Qwen · 검색 근거 기반 답변</option>
+            </select>
+            <div id="chat-openai-key-wrap" class="chat-key-wrap hidden">
+              <input id="chat-openai-key" type="password" class="input chat-key-input" placeholder="sk-... OpenAI API Key"
+                     autocomplete="off" spellcheck="false" />
+              <button type="button" id="chat-openai-key-toggle" class="chat-key-eye" title="키 표시/숨김"><i class="fa-solid fa-eye"></i></button>
+            </div>
+            <button id="clear-chat" class="btn-secondary text-xs">초기화</button>
+          </div>
         </div>
         <div id="chat-messages" class="flex-1 overflow-y-auto py-4 space-y-4 pr-1"></div>
         <div class="pt-4 border-t border-white/10">
@@ -569,7 +609,7 @@
       <div class="card">
         <div class="flex items-center justify-between mb-4">
           <div>
-            <h2 class="text-lg font-semibold">🤖 10분 자동매매 (Agentic AI)</h2>
+            <h2 class="text-lg font-semibold">🤖 3분 자동매매 (Agentic AI)</h2>
             <p class="text-xs text-slate-400 mt-1">AI가 10분마다 5개 종목을 분석하여 자동으로 가상 매매합니다.</p>
           </div>
           <div id="auto-trade-status" class="text-sm text-slate-400"></div>
@@ -663,13 +703,14 @@
           실제 API 키를 입력하면 실시간 시세·계좌·주문을 사용합니다. 비워두면 Mockup 데이터로 동작합니다.
         </p>
         <div class="space-y-4">
-          <div class="grid md:grid-cols-2 gap-3">
+          <div class="grid md:grid-cols-3 gap-3">
             <div>
               <label class="text-sm text-slate-400 block mb-1">투자 모드</label>
               <select id="quant-mode" class="input">
                 <option value="paper">모의투자 (Paper)</option>
                 <option value="live">실전투자 (Live)</option>
               </select>
+              <p id="quant-live-route" class="text-xs mt-1" style="color:var(--text-mute);"></p>
             </div>
             <div>
               <label class="text-sm text-slate-400 block mb-1">종목 선택 방식</label>
@@ -677,6 +718,13 @@
                 <option value="ai">AI 추천 종목</option>
                 <option value="manual">직접 종목 선택</option>
               </select>
+            </div>
+            <div>
+              <label class="text-sm text-slate-400 block mb-1">전략 (백테스트 합격분)</label>
+              <select id="quant-strategy" class="input">
+                <option value="">기본 규칙 (기술지표 시그널)</option>
+              </select>
+              <p id="quant-strategy-hint" class="text-xs mt-1" style="color:var(--text-mute);"></p>
             </div>
           </div>
           <div>
@@ -691,8 +739,9 @@
               <option value="meritz">메리츠증권 (출시 예정)</option>
               <option value="shinhan">신한투자증권</option>
             </select>
+            <div id="broker-managed" class="hidden rounded-xl p-3 mt-2 text-sm" style="background:var(--surf2);border:1px solid var(--border);"></div>
           </div>
-          <div class="grid md:grid-cols-2 gap-3">
+          <div id="broker-credentials-wrap" class="grid md:grid-cols-2 gap-3">
             <div>
               <label class="text-xs text-slate-400">App Key</label>
               <input id="broker-app-key" type="text" class="input mt-1" placeholder="API App Key" />
@@ -770,6 +819,14 @@
             <button id="broker-test" class="btn-secondary">연결 테스트</button>
           </div>
           <div id="broker-status" class="text-sm text-slate-400"></div>
+          <div id="quant-cycle-status" class="rounded-xl p-3 text-sm" style="background:var(--surf2);border:1px solid var(--border);color:var(--text-mute);">사이클 상태 불러오는 중…</div>
+          <div class="rounded-xl p-3" style="background:var(--surf2);border:1px solid var(--border);">
+            <div class="flex items-center justify-between mb-2">
+              <h4 class="text-sm font-semibold">📨 KIS 실주문 현황 (게이트웨이 경유 · 2분마다 체결 확인)</h4>
+              <button id="live-orders-refresh" class="btn-secondary text-xs">새로고침</button>
+            </div>
+            <div id="quant-live-orders" class="text-sm" style="color:var(--text-mute);">불러오는 중…</div>
+          </div>
         </div>
       </div>
     </div>
@@ -1078,8 +1135,10 @@
     <div class="view" data-view="company-compare">
       <div class="card">
         <h2 class="text-lg font-semibold mb-1">📋 투자 지표 비교 분석</h2>
-        <p class="text-xs mb-4" style="color:var(--text-mute);">주요 5개 종목의 핵심 투자 인디케이터를 나란히 비교합니다</p>
-        <div id="co-compare-table" class="overflow-x-auto"></div>
+        <p class="text-xs mb-4" style="color:var(--text-mute);">KIS 모의투자 분석 후보 30개 종목을 세로 행, 펀더멘털 지표 30개를 가로 열로 비교합니다. 열 제목으로 정렬·필터를 사용하고 가로로 스크롤하여 전체 지표를 확인하세요.</p>
+        <div class="flex items-center justify-between gap-2 mb-3"><p id="co-compare-status" class="text-xs" role="status" aria-live="polite"></p><button id="co-compare-refresh" class="btn-secondary text-xs">새로고침</button></div>
+        <p class="text-xs mb-3" style="color:var(--text-mute);">출처: Yahoo Finance · 정상 캐시 최대 6시간 · 갱신 실패 시 최대 7일 이내의 이전 자료를 표시합니다. 조회 상태가 ‘가격만 조회’ 또는 ‘조회 불가’이면 재무 지표는 N/A입니다. 지표별 결산 기간은 다를 수 있습니다. D/E는 차입금 기준입니다.</p>
+        <div id="co-compare-table" style="height:70vh;min-height:400px;width:100%;" aria-label="종목별 펀더멘털 AG Grid 비교"></div>
       </div>
     </div>
 
@@ -1211,10 +1270,27 @@
     </div>
 
     <div class="view" data-view="company-sector">
-      <div class="card">
-        <h2 class="text-lg font-semibold mb-1">🗂️ 섹터별 투자 인디케이터</h2>
-        <p class="text-xs mb-4" style="color:var(--text-mute);">산업·섹터별 밸류에이션 및 수익성 지표를 비교 분석합니다</p>
-        <div id="co-sector-cards" class="grid md:grid-cols-3 gap-4"></div>
+      <div class="space-y-4">
+        <div class="card">
+          <div class="flex items-start justify-between gap-3 flex-wrap mb-1">
+            <div>
+              <h2 class="text-lg font-semibold">🗂️ 섹터별 투자 인디케이터</h2>
+              <p class="text-xs mt-1" style="color:var(--text-mute);">자동매매 유니버스를 섹터로 묶어 밸류에이션·수익성·성장·재무안정성·가격모멘텀·시장폭을 실제 펀더멘털·일봉에서 계산합니다</p>
+            </div>
+            <div class="flex items-center gap-2">
+              <button id="co-sector-refresh" class="btn-secondary text-xs">새로고침</button>
+              <button id="co-sector-recalc" class="btn-secondary text-xs" title="캐시를 버리고 Yahoo 에서 다시 받아 재계산합니다(수십 초)">재계산</button>
+            </div>
+          </div>
+          <div id="co-sector-meta" class="text-xs" style="color:var(--text-mute);"></div>
+          <div id="co-sector-bench" class="mt-3"></div>
+        </div>
+        <div class="card">
+          <h3 class="font-semibold mb-3 text-sm">📋 섹터 비교</h3>
+          <div class="overflow-x-auto"><table id="co-sector-table" class="w-full text-xs"></table></div>
+          <div id="co-sector-rule" class="text-xs mt-2" style="color:var(--text-mute);"></div>
+        </div>
+        <div id="co-sector-cards" class="space-y-4"></div>
       </div>
     </div>
 
@@ -1320,7 +1396,17 @@
             <h3 class="font-semibold mb-3 text-sm">🎯 목표 비중 플랜</h3>
             <div class="grid grid-cols-2 gap-3 mb-3">
               <div class="col-span-2"><label class="text-xs font-semibold" style="color:var(--text-dim);">플랜 이름</label><input id="rb-name" class="input mt-1" placeholder="예) 60/40 코어 포트폴리오" /></div>
+              <div class="col-span-2"><label class="text-xs font-semibold" style="color:var(--text-dim);">리밸런싱 대상 계좌</label>
+                <select id="rb-source" class="input mt-1">
+                  <option value="paper">내부 모의계좌 (paper_trading)</option>
+                  <option value="kis">KIS 모의투자 (한국투자증권 Testbed · 게이트웨이 실주문)</option>
+                </select>
+                <p id="rb-source-note" class="text-xs mt-1" style="color:var(--text-mute);"></p></div>
             </div>
+            <h4 class="font-semibold text-xs mb-1" style="color:var(--text-dim);">섹터 목표 비중 (%) — KIS 투자 유니버스 3개 섹터</h4>
+            <p class="text-xs mb-2" style="color:var(--text-mute);">섹터 비중이 1차 배분입니다. 섹터 안에서는 아래 종목 목표(있으면)를 먼저 채우고, 나머지는 해당 섹터의 보유 종목에 균등 배분합니다. 보유가 없는 섹터는 유니버스 종목으로 채웁니다. 합계가 100% 미만이면 나머지는 현금.</p>
+            <div id="rb-sector-inputs" class="grid grid-cols-3 gap-2 mb-3"></div>
+            <h4 class="font-semibold text-xs mb-1" style="color:var(--text-dim);">종목 목표 비중 (선택 — 섹터 안에서 특정 종목을 고정)</h4>
             <div class="flex flex-wrap gap-2 items-end mb-2">
               <div class="flex-1 min-w-[140px]"><label class="text-xs font-semibold" style="color:var(--text-dim);">종목코드</label><input id="rb-add-symbol" class="input mt-1" placeholder="005930 / AAPL" /></div>
               <div style="width:110px"><label class="text-xs font-semibold" style="color:var(--text-dim);">비중(%)</label><input id="rb-add-weight" type="number" min="0" max="100" step="0.5" class="input mt-1" placeholder="30" /></div>
@@ -1418,10 +1504,12 @@
                 <option value="80">80% 이상</option>
               </select>
             </div>
-            <div class="flex items-end">
+            <div class="flex items-end gap-2">
               <button id="screen-run-btn" class="btn-primary w-full">스크리닝 실행</button>
+              <button id="screen-stop-btn" class="btn-red hidden" style="white-space:nowrap;">■ 중지</button>
             </div>
           </div>
+          <div id="screen-status" class="text-xs" style="color:var(--text-mute);min-height:16px;"></div>
         </div>
 
         <!-- AI 시그널 카드 -->
@@ -1471,9 +1559,50 @@
           <h2 class="text-lg font-semibold mb-1">🕯️ 차트 패턴 · 지지/저항 · 멀티타임프레임 신호</h2>
           <p class="text-xs mb-3" style="color:var(--text-mute);">캔들 패턴(해머·장악형·샛별형 등)과 피벗 기반 지지·저항선, 돌파·골든크로스 이벤트를 탐지하고, 분봉(60분)·일봉·주봉 지표를 종합해 매수·매도·관망 신호와 신뢰도를 산출합니다.</p>
           <div class="flex flex-wrap gap-2 items-end">
-            <div><label class="text-xs" style="color:var(--text-mute);">종목</label><input id="pt-symbol" class="input" value="005930.KS" style="width:160px" /></div>
+            <div><label for="pt-symbol" class="text-xs" style="color:var(--text-mute);">종목코드</label><input id="pt-symbol" class="input" value="005930.KS" placeholder="005930.KS / AAPL" style="width:160px" /></div>
+            <button id="pt-search" class="btn-ghost" type="button">🔍 종목 검색</button>
+            <span id="pt-selected" class="text-xs" style="color:var(--text-mute);">삼성전자</span>
             <button id="pt-run" class="btn-primary">분석 실행</button>
           </div>
+        </div>
+        <section id="pt-sr-guide" class="card" aria-labelledby="pt-sr-guide-title">
+          <h3 id="pt-sr-guide-title" class="font-semibold text-sm mb-3">지지·저항, 이렇게 읽으세요</h3>
+          <div class="grid md:grid-cols-2 gap-3 text-sm" style="line-height:1.7;color:var(--text-dim);">
+            <div class="rounded-lg p-3" style="background:var(--surf2);border-left:3px solid #089981;">
+              <h4 class="font-semibold" style="color:#087f6b;">지지 (초록) · 하락할 때 살펴볼 가격대</h4>
+              <p>가격이 내려올 때 매수세가 유입되어 <strong>하락이 멈추거나 반등할 가능성이 있는 구간</strong>입니다. 이 화면에서는 분석 기준가보다 아래에 있는 과거 주요 가격대를 지지로 표시합니다.</p>
+            </div>
+            <div class="rounded-lg p-3" style="background:var(--surf2);border-left:3px solid #ef4444;">
+              <h4 class="font-semibold" style="color:#c53030;">저항 (빨강) · 상승할 때 살펴볼 가격대</h4>
+              <p>가격이 올라올 때 매도세가 유입되어 <strong>상승이 멈추거나 되밀릴 가능성이 있는 구간</strong>입니다. 이 화면에서는 분석 기준가 이상에 있는 과거 주요 가격대를 저항으로 표시합니다.</p>
+            </div>
+          </div>
+          <p class="text-xs mt-3" style="color:var(--text-dim);line-height:1.7;"><strong>예시:</strong> 기준가가 10,000일 때 지지 9,500(-5%)은 하락 시 가격 반응을 살펴볼 구간이고, 저항 10,500(+5%)은 상승 시 가격 반응을 살펴볼 구간입니다. 선은 해당 가격대의 대표값이며, 정확히 그 가격에서만 반응한다는 뜻은 아닙니다.</p>
+          <details class="mt-3 text-xs" style="color:var(--text-dim);line-height:1.8;">
+            <summary class="font-semibold" style="cursor:pointer;">돌파·이탈과 표의 수치 해석</summary>
+            <ul class="list-disc ml-5 mt-2 space-y-1">
+              <li><strong>지지 아래로 이탈:</strong> 하락을 받치던 가격대가 무너지는 상황입니다. 이후 되올라올 때 그 가격대가 저항으로 작용할 수 있습니다.</li>
+              <li><strong>저항 위로 돌파:</strong> 상승을 막던 가격대를 넘어서는 상황입니다. 이후 되내려올 때 그 가격대가 지지로 작용할 수 있습니다.</li>
+              <li><strong>기준가 대비:</strong> (가격대 ÷ 분석 기준가 − 1) × 100입니다. 음수는 기준가 아래, 양수는 기준가 위이며 예상 수익률이나 반등 확률이 아닙니다. 기준가는 마지막 일봉의 종가 값으로, 장중에는 변동할 수 있습니다.</li>
+              <li><strong>터치·강도:</strong> 이 서비스의 터치는 비슷한 가격대에 모인 과거 고점·저점의 수입니다. 1회는 약, 2회는 중, 3회 이상은 강으로 표시하며, 강도는 성공 확률을 뜻하지 않습니다.</li>
+              <li><strong>산출 기준:</strong> 최근 최대 120개 일봉에서 전후 5개 봉과 비교한 고점·저점을 찾고, 약 1% 이내의 가격대를 묶어 대표값을 계산합니다. 터치 수와 기준가와의 거리로 후보를 고른 뒤 최대 6개를 표시합니다. 가까운 지지·저항은 이 후보 안에서 선택합니다.</li>
+            </ul>
+          </details>
+          <p class="text-xs mt-3" style="color:var(--text-mute);line-height:1.7;">지지 도달이 자동 매수 신호이거나 저항 도달이 자동 매도 신호인 것은 아닙니다. 종가가 가격대를 유지하는지, 거래량과 추세가 뒷받침되는지 함께 확인하세요. 돌파 후 다시 되돌아올 수도 있습니다.</p>
+          <p class="text-xs mt-2" style="color:var(--text-mute);">개념 참고: <a href="https://www.fidelity.com/learning-center/trading-investing/technical-analysis/support-and-resistance" target="_blank" rel="noopener noreferrer" style="color:var(--accent);">Fidelity · 지지와 저항</a></p>
+        </section>
+        <div id="pt-chart-card" class="card hidden">
+          <h3 id="pt-chart-title" class="font-semibold text-sm mb-2"></h3>
+          <div class="flex flex-wrap gap-3 text-xs mb-2">
+            <label><input id="pt-show-sr" type="checkbox" checked /> 지지(초록) · 저항(빨강)</label>
+            <label><input id="pt-show-patterns" type="checkbox" checked /> 패턴 · 돌파 표시</label>
+            <span style="color:var(--text-mute);">일봉 1년 · 휠/핀치로 확대 · 드래그로 이동</span>
+            <button id="pt-chart-reset" class="btn-secondary text-xs" type="button">차트 초기화</button>
+          </div>
+          <p id="pt-chart-ohlc" class="text-xs mb-2" style="color:var(--text-dim);min-height:20px;"></p>
+          <div id="pt-chart" role="img" aria-label="TradingView 일봉 캔들 차트와 지지·저항 및 패턴 표시" style="height:440px;width:100%;"></div>
+          <p class="text-xs mt-2" style="color:var(--text-mute);"><a href="https://www.tradingview.com/" target="_blank" rel="noopener noreferrer" style="color:var(--accent);">TradingView Lightweight Charts™</a> · Copyright (с) 2025 TradingView, Inc. · 시세/분석 데이터: 본 서비스 일봉 API</p>
+          <p id="pt-chart-note" class="text-xs mt-2" style="color:var(--text-mute);"></p>
         </div>
         <div id="pt-mtf" class="card hidden"></div>
         <div class="grid lg:grid-cols-2 gap-4">
@@ -1494,21 +1623,92 @@
             </div>
             <div id="robo-decision-status" class="text-sm" style="color:var(--text-dim);"></div>
           </div>
-          <div class="flex gap-3 mb-4">
-            <button id="robo-decision-start" class="btn-green">▶ 의사결정 시작</button>
+          <div class="flex flex-wrap gap-3 mb-2">
+            <button id="robo-decision-start-kis" class="btn-green" title="내 계정을 KIS 모의투자(live·kis·AI 추천 종목)로 바꾸고 의사결정을 시작합니다. 매수·매도가 한국투자증권 Testbed 모의계좌에 실제 모의주문으로 전송됩니다.">▶ KIS 모의투자로 시작</button>
+            <button id="robo-decision-start" class="btn-secondary" title="내 계정의 현재 설정(기본: 가상 계좌 1,000만 원)으로 의사결정을 시작합니다. KIS 주문은 나가지 않습니다.">▶ 가상 계좌로 시작</button>
             <button id="robo-decision-stop" class="btn-red">■ 중지</button>
-            <button id="robo-decision-refresh" class="btn-secondary text-xs">로그 새로고침</button>
           </div>
-          <div class="rounded-lg p-3 mb-4 text-xs" style="background:rgba(41,98,255,0.08);color:var(--accent);border:1px solid rgba(41,98,255,0.2);">
-            <strong>AI 의사결정 프로세스:</strong> 퀀트 모델 시그널 수집 → 패턴 인식 분석 → 포트폴리오 리밸런싱 판단 → 가상 주문 실행 → 성과 기록
+          <div id="robo-decision-account" class="text-xs mb-3" style="color:var(--text-dim);"></div>
+          <div class="rounded-lg p-3 text-xs" style="background:rgba(41,98,255,0.08);color:var(--accent);border:1px solid rgba(41,98,255,0.2);">
+            <strong>AI 의사결정 프로세스:</strong> 지표·시그널 계산(공격 모드는 5분봉) → 대상 종목 선정 → 익절·손절·약세 매도 / 상위 매수 계획 → 위험관리 게이트(일손실·비중·쿨다운·일 주문 수) → 가상 체결 → <b>KIS 모의계좌 실주문(KIS 모드)</b> → 성과 기록
           </div>
-          <div id="robo-decision-log" class="space-y-2 text-xs max-h-[420px] overflow-y-auto"></div>
         </div>
 
         <!-- 의사결정 근거 요약 -->
         <div class="card">
           <h3 class="font-semibold mb-3 text-sm">📊 최근 AI 투자 판단 근거</h3>
           <div id="robo-rationale" class="grid md:grid-cols-3 gap-3"></div>
+        </div>
+
+        <!-- 로그성 정보는 화면 맨 아래에 모아 둔다 (판단 결과를 먼저 보고, 실행 기록은 필요할 때 내려 본다) -->
+        <div class="card">
+          <div class="flex items-center justify-between gap-2 mb-1 flex-wrap">
+            <h3 class="font-semibold text-sm">🧾 실행 로그</h3>
+            <button id="robo-decision-refresh" class="btn-secondary text-xs">로그 새로고침</button>
+          </div>
+          <p class="text-xs mb-3" style="color:var(--text-mute);">사이클별 계좌 평가·체결·위험관리 생략·공격 모드 메모·정합성 점검 기록입니다. 최근 것이 아래로 쌓입니다.</p>
+          <div id="robo-decision-log" class="space-y-2 text-xs max-h-[420px] overflow-y-auto"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="view" data-view="kis-monitor">
+      <style>.kism-data-grid{width:100%;min-width:0}.kism-data-grid .ag-paging-panel{flex-wrap:wrap;justify-content:flex-start;height:auto;min-height:46px;gap:8px;padding:8px}.kism-data-grid .ag-paging-row-summary-panel,.kism-data-grid .ag-paging-page-summary-panel{margin:0}.kism-data-grid .ag-cell{font-variant-numeric:tabular-nums}</style>
+      <div class="space-y-4">
+        <div class="card">
+          <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+            <div>
+              <h2 class="text-lg font-semibold">📈 KIS 모의투자결과</h2>
+              <p class="text-xs mt-1" style="color:var(--text-mute);">한국투자증권 Testbed 자동매매(백그라운드 배치)만 모니터링합니다. 계좌·실주문·사이클·정합성을 한 화면에서 봅니다. 각 데이터 그리드는 페이지당 10건을 표시합니다.</p>
+            </div>
+            <div class="flex items-center gap-2 text-xs">
+              <label class="flex items-center gap-1" style="color:var(--text-dim);"><input type="checkbox" id="kism-auto" checked> 60초 자동 새로고침</label>
+              <button id="kism-refresh" class="btn-secondary text-xs">새로고침</button>
+            </div>
+          </div>
+          <div id="kism-badges" class="flex flex-wrap gap-2 text-xs mb-3"></div>
+          <div id="kism-kpis" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3"></div>
+          <div id="kism-updated" class="text-xs mt-2" style="color:var(--text-mute);"></div>
+        </div>
+
+        <div class="card">
+          <h3 class="font-semibold mb-2 text-sm">🧾 봇 실주문 (KIS 게이트웨이) <span id="kism-orders-note" class="text-xs" style="color:var(--text-mute);"></span></h3>
+          <!-- 검색 툴바: GET /api/quant/kis/orders (구분 봇/사용자 · 상태 · 방향 · 기간 · 텍스트 · 건수). 결과는 컬럼 헤더 클릭으로 정렬 -->
+          <form id="kism-orders-form" class="flex flex-wrap items-end gap-2 text-xs mb-2" onsubmit="return false;">
+            <label class="flex flex-col gap-1"><span style="color:var(--text-mute);">구분</span>
+              <select id="kism-o-owner" class="input text-xs" style="padding:4px 8px;"><option value="all">전체</option><option value="batch">봇(배치)</option><option value="me">사용자(내 계정)</option></select></label>
+            <label class="flex flex-col gap-1"><span style="color:var(--text-mute);">상태</span>
+              <select id="kism-o-status" class="input text-xs" style="padding:4px 8px;"><option value="">전체</option><option value="FILLED">FILLED</option><option value="ACCEPTED,PARTIALLY_FILLED,PENDING,CANCEL_REQUESTED">열린 주문</option><option value="ACCEPTED">ACCEPTED</option><option value="PARTIALLY_FILLED">PARTIALLY_FILLED</option><option value="PENDING">PENDING</option><option value="UNKNOWN,LOST,ERROR,REJECTED">미해결·실패</option><option value="UNKNOWN">UNKNOWN</option><option value="LOST">LOST</option><option value="ERROR">ERROR</option><option value="REJECTED">REJECTED</option><option value="CANCELLED">CANCELLED</option></select></label>
+            <label class="flex flex-col gap-1"><span style="color:var(--text-mute);">방향</span>
+              <select id="kism-o-side" class="input text-xs" style="padding:4px 8px;"><option value="">전체</option><option value="BUY">BUY</option><option value="SELL">SELL</option></select></label>
+            <label class="flex flex-col gap-1"><span style="color:var(--text-mute);">기간 (KST)</span>
+              <span class="flex items-center gap-1"><input type="date" id="kism-o-from" class="input text-xs" style="padding:4px 8px;"> ~ <input type="date" id="kism-o-to" class="input text-xs" style="padding:4px 8px;"></span></label>
+            <label class="flex flex-col gap-1" style="min-width:220px;"><span style="color:var(--text-mute);">검색어</span>
+              <input id="kism-o-q" class="input text-xs" style="padding:4px 8px;" placeholder="종목코드 · 종목명 · 주문번호 · 메모"></label>
+            <button type="submit" id="kism-o-search" class="btn-secondary text-xs">검색</button>
+            <button type="button" id="kism-o-reset" class="btn-secondary text-xs">초기화</button>
+            <button type="button" id="kism-o-csv" class="btn-secondary text-xs" title="그리드의 정렬·필터를 반영한 검색 결과 전체를 CSV로 내려받기">CSV</button>
+
+          </form>
+          <div id="kism-orders-result" class="text-xs mb-1" style="color:var(--text-mute);"></div>
+          <div id="kism-orders" class="kism-data-grid" aria-label="KIS 주문 검색"></div>
+        </div>
+
+        <div class="grid lg:grid-cols-2 gap-4">
+          <div class="card">
+            <h3 class="font-semibold mb-2 text-sm">💼 KIS 계좌 보유 <span id="kism-holdings-note" class="text-xs" style="color:var(--text-mute);"></span></h3>
+            <div id="kism-holdings" class="kism-data-grid" aria-label="KIS 계좌 보유"></div>
+          </div>
+          <div class="card">
+            <h3 class="font-semibold mb-2 text-sm">🔎 정합성 (로그 vs 실거래) <span id="kism-recon-note" class="text-xs" style="color:var(--text-mute);"></span></h3>
+            <p id="kism-recon-summary" class="text-xs mb-2" style="color:var(--text-dim);"></p>
+            <div id="kism-recon" class="kism-data-grid" aria-label="KIS 정합성 문제"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3 class="font-semibold mb-2 text-sm">🔁 3분 사이클 이력 (배치) <span id="kism-cycles-note" class="text-xs" style="color:var(--text-mute);"></span></h3>
+          <div id="kism-cycles" class="kism-data-grid" aria-label="KIS 배치 사이클"></div>
         </div>
       </div>
     </div>
@@ -1541,8 +1741,9 @@
                 <option value="2y">2년</option>
               </select>
             </div>
-            <div class="col-span-2 flex items-end">
+            <div class="col-span-2 flex items-end gap-2">
               <button id="ind-load-btn" class="btn-primary">전략 분석</button>
+              <button id="ind-trade-btn" class="btn-green" disabled title="전략 분석을 먼저 실행하세요">💰 KIS 모의투자 거래</button>
             </div>
           </div>
 
@@ -1661,10 +1862,13 @@
         <!-- PineScript 코드 -->
         <div class="card">
           <div class="flex items-center justify-between mb-3">
-            <h3 class="font-semibold text-sm">📝 PineScript 코드 (TradingView)</h3>
-            <button id="ci-copy-pine" class="btn-secondary text-xs">복사</button>
+            <h3 class="font-semibold text-sm">📝 Pine Script v6 코드 (TradingView)</h3>
+            <div class="flex gap-2"><button id="ci-check-pine" class="btn-primary text-xs">문법 체크</button><button id="ci-copy-pine" class="btn-secondary text-xs">복사</button></div>
           </div>
-          <pre id="ci-pine-code" class="text-xs rounded-lg p-4 overflow-x-auto" style="background:var(--surf2);border:1px solid var(--border);color:var(--text-dim); min-height:160px;"></pre>
+          <label for="ci-pine-code" class="text-xs" style="color:var(--text-mute);">코드를 편집하거나 붙여넣은 뒤 문법 체크를 실행하세요.</label>
+          <textarea id="ci-pine-code" class="input text-xs rounded-lg p-4 mt-2" rows="20" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Pine Script v6 코드 편집기" style="font-family:monospace;line-height:1.6;white-space:pre;overflow:auto;resize:vertical;background:var(--surf2);color:var(--text-dim);"></textarea>
+          <div id="ci-pine-check-result" class="text-xs mt-3" role="status" aria-live="polite"></div>
+          <p class="text-xs mt-3" style="color:var(--text-mute);">기본 검사 범위: 버전·선언문·괄호·문자열·일부 v6 호환 오류. 함수·변수의 전체 타입 검사 및 최종 컴파일은 <a href="https://www.tradingview.com/chart/" target="_blank" rel="noopener noreferrer" style="color:var(--accent);">TradingView Pine Editor</a>에서 확인하세요. 직접 편집한 코드는 복사에 반영되며, 저장·백테스트는 위 파라미터 기준으로 실행됩니다.</p>
         </div>
 
         <!-- Python 코드 -->
@@ -2338,6 +2542,51 @@ RC_i = wi × (Σw)_i / √(w'Σw)
 <script type="module" src="/js/main.js"></script>
 
 <!-- 종목 검색 모달 -->
+<!-- 데이터 조회 대기 모달: 모래시계 + 경과 시간 -->
+<div id="app-loading-modal" class="app-modal" role="dialog" aria-modal="true" aria-live="polite" aria-label="불러오는 중">
+  <div class="app-modal-box" style="max-width:340px;text-align:center;">
+    <div class="app-hourglass" aria-hidden="true">⏳</div>
+    <div id="app-loading-title" class="font-semibold" style="margin-top:10px;">불러오는 중…</div>
+    <div id="app-loading-desc" class="text-xs" style="color:var(--text-mute);margin-top:6px;"></div>
+    <div id="app-loading-elapsed" style="font-size:24px;font-weight:700;margin-top:12px;font-variant-numeric:tabular-nums;">0.0초</div>
+    <div class="text-xs" style="color:var(--text-mute);margin-top:4px;">데이터가 표시될 때까지 기다려 주세요</div>
+  </div>
+</div>
+
+<!-- KIS 모의투자 주문 모달 -->
+<div id="kis-trade-modal" class="app-modal" role="dialog" aria-modal="true" aria-label="KIS 모의투자 주문">
+  <div class="app-modal-box">
+    <div class="flex items-center justify-between mb-3">
+      <h3 class="font-semibold text-sm">💰 KIS 모의투자 주문</h3>
+      <button id="kis-trade-close" style="background:none;border:none;cursor:pointer;color:var(--text-mute);font-size:18px;">✕</button>
+    </div>
+    <div id="kis-trade-stock" class="rounded-lg p-3 mb-3 text-sm" style="background:var(--surf2);border:1px solid var(--border);"></div>
+    <div class="mb-3">
+      <label class="text-xs font-semibold" style="color:var(--text-dim);">주문 구분</label>
+      <div class="flex gap-2 mt-1">
+        <button type="button" class="btn-secondary text-xs kis-side-btn" data-side="buy">매수</button>
+        <button type="button" class="btn-secondary text-xs kis-side-btn" data-side="sell">매도</button>
+      </div>
+    </div>
+    <div class="mb-3">
+      <label class="text-xs font-semibold" for="kis-trade-qty" style="color:var(--text-dim);">수량 (주)</label>
+      <input id="kis-trade-qty" class="input mt-1" type="number" min="1" step="1" value="1" inputmode="numeric" />
+      <div class="flex gap-2 mt-2">
+        <button type="button" class="btn-secondary text-xs kis-qty-btn" data-qty="1">1주</button>
+        <button type="button" class="btn-secondary text-xs kis-qty-btn" data-qty="5">5주</button>
+        <button type="button" class="btn-secondary text-xs kis-qty-btn" data-qty="10">10주</button>
+        <button type="button" class="btn-secondary text-xs kis-qty-btn" data-qty="50">50주</button>
+      </div>
+    </div>
+    <div id="kis-trade-amount" class="text-sm mb-3"></div>
+    <div id="kis-trade-note" class="text-xs mb-3" style="color:var(--text-mute);"></div>
+    <div class="flex gap-2 justify-end">
+      <button id="kis-trade-cancel" class="btn-secondary text-xs">취소</button>
+      <button id="kis-trade-submit" class="btn-green text-xs">주문 전송</button>
+    </div>
+  </div>
+</div>
+
 <div id="stock-search-modal" role="dialog" aria-modal="true" aria-label="종목 검색">
   <div class="ssm-box">
     <div class="ssm-header">
@@ -2363,6 +2612,18 @@ RC_i = wi × (Σw)_i / √(w'Σw)
       <button id="tm-close" class="tm-close">✕</button>
     </div>
     <div id="tm-body" class="tm-body"></div>
+  </div>
+</div>
+
+<!-- 스크리닝 XAI 설명 모달 -->
+<div id="xai-modal" role="dialog" aria-modal="true" aria-labelledby="xai-modal-title" hidden>
+  <div class="xai-modal-backdrop" data-xai-close></div>
+  <div class="xai-modal-panel">
+    <div class="xai-modal-head">
+      <h3 id="xai-modal-title" class="font-semibold text-sm">🧠 AI 판단 근거</h3>
+      <button type="button" class="xai-modal-close" data-xai-close aria-label="닫기">✕</button>
+    </div>
+    <div id="xai-modal-body" class="xai-modal-body"></div>
   </div>
 </div>
 </body>

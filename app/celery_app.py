@@ -47,10 +47,25 @@ celery_app.conf.update(
             "schedule": 86400.0,          # 24시간
             "options": {"expires": 82800},
         },
-        "quant-auto-trade-10min": {
+        "quant-reconcile": {
+            "task": "quant.reconcile",
+            "schedule": float(settings.RECONCILE_INTERVAL_SEC),   # 기본 10분 — 로그 vs KIS 실거래 정합성
+            "options": {"expires": max(60, int(settings.RECONCILE_INTERVAL_SEC) - 30)},
+        },
+        "beat-heartbeat-1min": {
+            "task": "beat.heartbeat",
+            "schedule": 60.0,             # 1분 — beat/worker 생존 신호 (healthcheck → autoheal 재시작)
+            "options": {"expires": 50},
+        },
+        "quant-auto-trade-cycle": {
             "task": "quant.auto_trade_cycle",
-            "schedule": 600.0,            # 10분 — 자동매매 활성 사용자 사이클
-            "options": {"expires": 540},
+            "schedule": float(settings.QUANT_CYCLE_SEC),                       # 기본 3분 — 자동매매 활성 사용자 사이클 (2026-10-07, 5분→3분)
+            "options": {"expires": max(30, int(settings.QUANT_CYCLE_SEC) - 20)},  # 다음 주기 전에 만료 — 지연된 사이클이 겹쳐 실행되지 않게
+        },
+        "quant-confirm-fills-2min": {
+            "task": "quant.confirm_fills",
+            "schedule": 120.0,            # 2분 — 게이트웨이 경유 KIS 실주문의 체결 확인 (live_orders)
+            "options": {"expires": 110},
         },
         "rebalance-check-hourly": {
             "task": "rebalance.check_triggers",

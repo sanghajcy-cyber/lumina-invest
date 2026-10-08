@@ -1,17 +1,151 @@
 /* 투자 인디케이터: 기본 전략, 커스텀 인디케이터(Pine/Python 생성·저장), 성과 검증, 증권사 API 자동화
  * app.html 인라인 스크립트에서 분리됨. 엔트리는 main.js */
+import { checkPineV6 } from "/js/pine-lint.js";
 import { api, getMe, setToast, escHtml, fmt, fmtPct, colorPct } from "/js/common.js";
 import { compareTrayAdd, renderCompareTrayAll, tt } from "/js/core.js";
 import { renderXaiBlock } from "/js/robo.js";
+
+// ── 데이터 대기 모달 (모래시계 + 경과 시간) ────────────────────────
+// 조회가 몇 초 걸리는지 사용자가 알 수 있어야 "멈춘 화면"으로 오해하지 않는다.
+let _loadingTimer = null;
+function showLoadingModal(title, desc = "") {
+  const modal = document.getElementById("app-loading-modal");
+  if (!modal) return;
+  document.getElementById("app-loading-title").textContent = title;
+  document.getElementById("app-loading-desc").textContent = desc;
+  const elapsedEl = document.getElementById("app-loading-elapsed");
+  const started = performance.now();
+  elapsedEl.textContent = "0.0초";
+  modal.classList.add("open");
+  clearInterval(_loadingTimer);
+  _loadingTimer = setInterval(() => {
+    elapsedEl.textContent = `${((performance.now() - started) / 1000).toFixed(1)}초`;
+  }, 100);
+}
+function hideLoadingModal() {
+  clearInterval(_loadingTimer);
+  _loadingTimer = null;
+  document.getElementById("app-loading-modal")?.classList.remove("open");
+}
+
+// ── KIS 모의투자 주문 모달 ─────────────────────────────────────────
+// 전략 분석 결과(종목·현재가·신호)를 그대로 받아 몇 주 거래할지 입력받고,
+// 자동매매와 같은 경로(/api/stocks/quant/manual-order)로 KIS 모의계좌에 주문을 보낸다.
+let _tradeCtx = null;   // { symbol, name, price, signal }
+let _tradeSide = "buy";
+
+function tradeModalEl(id) { return document.getElementById(id); }
+
+function renderTradeAmount() {
+  const qty = Math.max(0, parseInt(tradeModalEl("kis-trade-qty").value, 10) || 0);
+  const amount = (_tradeCtx?.price || 0) * qty;
+  tradeModalEl("kis-trade-amount").innerHTML = qty
+    ? `예상 ${_tradeSide === "buy" ? "매수" : "매도"} 금액 <strong>${fmt(Math.round(amount))}원</strong> <span class="text-xs" style="color:var(--text-mute);">(${fmt(Math.round(_tradeCtx?.price || 0))}원 × ${qty}주)</span>`
+    : `<span class="text-xs" style="color:var(--red);">수량을 1주 이상 입력하세요</span>`;
+}
+
+function setTradeSide(side) {
+  _tradeSide = side;
+  document.querySelectorAll(".kis-side-btn").forEach(b => b.classList.toggle("active", b.dataset.side === side));
+  renderTradeAmount();
+}
+
+async function openTradeModal() {
+  if (!_tradeCtx) { setToast("전략 분석을 먼저 실행하세요", "error"); return; }
+  const modal = tradeModalEl("kis-trade-modal");
+  const note = tradeModalEl("kis-trade-note");
+  const submit = tradeModalEl("kis-trade-submit");
+  tradeModalEl("kis-trade-stock").innerHTML = `
+    <div class="font-semibold">${escHtml(_tradeCtx.name)} <span class="text-xs" style="color:var(--text-mute);">${escHtml(_tradeCtx.symbol)}</span></div>
+    <div class="text-xs mt-1" style="color:var(--text-mute);">현재가 ${fmt(Math.round(_tradeCtx.price))}원 · 전략 신호 ${escHtml(_tradeCtx.signal || "HOLD")}</div>`;
+  tradeModalEl("kis-trade-qty").value = 1;
+  setTradeSide(_tradeCtx.signal === "SELL" ? "sell" : "buy");
+  submit.disabled = true;
+  note.innerHTML = "주문 가능 여부를 확인하는 중…";
+  modal.classList.add("open");
+
+  try {
+    const r = await api("/api/stocks/quant/order-readiness");
+    const lines = [`경로: ${escHtml(r.route_detail || r.route || "미연동")}`];
+    if (!r.can_order) {
+      lines.push(`<span style="color:var(--red);">주문 불가 — ${escHtml({
+        not_connected: "KIS 연동이 되어 있지 않습니다.",
+        real_environment: "KIS 경로가 실전(real)이라 화면 주문을 막습니다.",
+        kill_switch: "비상 정지 상태입니다. 자동매매 현황에서 해제하세요.",
+      }[r.reason] || r.reason)}</span>`);
+    } else if (r.enforce_market_hours && !r.market_open) {
+      lines.push(`<span style="color:var(--red);">지금은 장 운영시간이 아닙니다 — 주문이 전송되지 않고 건너뜁니다.</span>`);
+    } else {
+      lines.push(`KIS 모의(Testbed) 계좌로 실제 모의주문이 전송됩니다. 실전계좌가 아닙니다.`);
+    }
+    note.innerHTML = lines.join("<br>");
+    submit.disabled = !r.can_order;
+  } catch (e) {
+    note.innerHTML = `<span style="color:var(--red);">주문 가능 여부 확인 실패: ${escHtml(e.message)}</span>`;
+    submit.disabled = true;
+  }
+}
+
+function closeTradeModal() { tradeModalEl("kis-trade-modal")?.classList.remove("open"); }
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && tradeModalEl("kis-trade-modal")?.classList.contains("open")) closeTradeModal();
+});
+
+document.getElementById("ind-trade-btn")?.addEventListener("click", openTradeModal);
+document.getElementById("kis-trade-close")?.addEventListener("click", closeTradeModal);
+document.getElementById("kis-trade-cancel")?.addEventListener("click", closeTradeModal);
+document.getElementById("kis-trade-modal")?.addEventListener("click", e => { if (e.target.id === "kis-trade-modal") closeTradeModal(); });
+document.getElementById("kis-trade-qty")?.addEventListener("input", renderTradeAmount);
+document.querySelectorAll(".kis-qty-btn").forEach(b => b.addEventListener("click", () => {
+  tradeModalEl("kis-trade-qty").value = b.dataset.qty;
+  renderTradeAmount();
+}));
+document.querySelectorAll(".kis-side-btn").forEach(b => b.addEventListener("click", () => setTradeSide(b.dataset.side)));
+
+document.getElementById("kis-trade-submit")?.addEventListener("click", async () => {
+  const qty = parseInt(tradeModalEl("kis-trade-qty").value, 10);
+  if (!Number.isInteger(qty) || qty < 1) { setToast("수량을 1주 이상 입력하세요", "error"); return; }
+  const sideLabel = _tradeSide === "buy" ? "매수" : "매도";
+  if (!confirm(`${_tradeCtx.name} ${qty}주를 KIS 모의투자로 ${sideLabel} 주문합니다.\n예상 금액 ${fmt(Math.round(_tradeCtx.price * qty))}원\n\n계속하시겠습니까?`)) return;
+  const submit = tradeModalEl("kis-trade-submit");
+  submit.disabled = true;
+  showLoadingModal("주문 전송 중…", `${_tradeCtx.name} ${qty}주 ${sideLabel}`);
+  try {
+    const r = await api("/api/stocks/quant/manual-order", {
+      method: "POST",
+      body: { symbol: _tradeCtx.symbol, name: _tradeCtx.name, side: _tradeSide, quantity: qty },
+    });
+    if (r.status === "submitted") {
+      setToast(`${sideLabel} 주문 전송됨 — ${r.quantity}주 · ${fmt(r.amount)}원${r.order_no ? ` (주문번호 ${r.order_no})` : ""}`, "ok");
+      closeTradeModal();
+    } else if (r.status === "skipped") {
+      setToast(`주문이 전송되지 않았습니다: ${r.reason === "market_closed" ? "장 운영시간이 아닙니다" : r.reason}`, "error");
+    } else {
+      setToast(`주문 실패: ${r.error || r.status}`, "error");
+    }
+  } catch (e) {
+    setToast(e.message, "error");
+  } finally {
+    hideLoadingModal();
+    submit.disabled = false;
+  }
+});
 
 // ── 투자 인디케이터: 기본 인디케이터 전략 ──────────────────────────
 document.getElementById("ind-load-btn").addEventListener("click", async () => {
   const symbol = document.getElementById("ind-symbol").value;
   const period = document.getElementById("ind-period").value;
+  const symbolLabel = document.getElementById("ind-symbol").selectedOptions[0]?.textContent?.trim() || symbol;
   const useMA5  = document.getElementById("ind-ma5").checked;
   const useMA20 = document.getElementById("ind-ma20").checked;
   const useRsi  = document.getElementById("ind-rsi").checked;
+  const loadBtn = document.getElementById("ind-load-btn");
+  const tradeBtn = document.getElementById("ind-trade-btn");
 
+  // 결과가 뜨기 전까지는 대기 모달로 경과 시간을 보여 주고, 거래 버튼은 잠가 둔다.
+  loadBtn.disabled = true;
+  if (tradeBtn) { tradeBtn.disabled = true; tradeBtn.title = "전략 분석을 먼저 실행하세요"; }
+  showLoadingModal("전략 분석 중…", `${symbolLabel} · ${period} 지표 계산`);
   try {
     const ind = await api(`/api/stocks/quant/indicators?symbol=${encodeURIComponent(symbol)}&period=${encodeURIComponent(period)}`);
     if (ind.error) throw new Error(ind.error);
@@ -53,34 +187,52 @@ document.getElementById("ind-load-btn").addEventListener("click", async () => {
       <p class="text-xs mt-2" style="color:var(--text-dim);">종합: ${buyCount > sellCount ? "📈 매수 우위 — 진입 고려" : sellCount > buyCount ? "📉 매도 우위 — 익절 고려" : "⏸ 중립 — 관망 권장"}</p>`;
 
     document.getElementById("ind-strategy-result").classList.remove("hidden");
-  } catch(e) { setToast(e.message, "error"); }
+
+    // 분석이 끝나야 거래할 수 있다 — 결과(종목·현재가·신호)를 주문 모달이 그대로 쓴다.
+    _tradeCtx = { symbol, name: symbolLabel, price, signal: sig.signal || "HOLD" };
+    if (tradeBtn) {
+      tradeBtn.disabled = !price;
+      tradeBtn.title = price ? `${symbolLabel} KIS 모의투자 주문` : "현재가를 가져오지 못해 주문할 수 없습니다";
+    }
+  } catch(e) {
+    _tradeCtx = null;
+    setToast(e.message, "error");
+  } finally {
+    hideLoadingModal();
+    loadBtn.disabled = false;
+  }
 });
 
 // ── 투자 인디케이터: 커스텀 인디케이터 개발 ──────────────────────────
 function generatePineCode() {
   const name   = document.getElementById("ci-name").value || "MyIndicator";
   const base   = document.getElementById("ci-base").value || "rsi_ma";
-  const short  = document.getElementById("ci-short").value || 5;
-  const mid    = document.getElementById("ci-mid").value || 20;
-  const rsiLen = document.getElementById("ci-rsi").value || 14;
-  const buyTh  = document.getElementById("ci-buy-th").value || 35;
+  const intValue = (id, fallback, min, max = 10000) => {
+    const raw = document.getElementById(id).value;
+    const value = raw === "" ? fallback : Number(raw);
+    return Number.isFinite(value) ? Math.min(max, Math.max(min, Math.trunc(value))) : fallback;
+  };
+  const short = intValue("ci-short", 5, 1);
+  const mid = intValue("ci-mid", 20, 1);
+  const rsiLen = intValue("ci-rsi", 14, 1);
+  const buyTh = intValue("ci-buy-th", 35, 0, 100);
   const signalCode = base === "macd_bb"
-    ? `macd_line = ta.ema(close, 12) - ta.ema(close, 26)\nmacd_sig  = ta.ema(macd_line, 9)\nbb_mid = ta.sma(close, mid_len)\nbuy_signal  = ta.crossover(macd_line, macd_sig) and close < bb_mid\nsell_signal = ta.crossunder(macd_line, macd_sig) or close > bb_mid + 2 * ta.stdev(close, mid_len)`
+    ? `macd_line = ta.ema(close, 12) - ta.ema(close, 26)\nmacd_sig  = ta.ema(macd_line, 9)\nbb_mid = ta.sma(close, mid_len)\nbb_upper = bb_mid + 2 * ta.stdev(close, mid_len)\nbuy_signal  = ta.crossover(macd_line, macd_sig) and close < bb_mid\nsell_signal = ta.crossunder(macd_line, macd_sig) or close > bb_upper`
     : base === "volume_rsi"
     ? `vol_ma = ta.sma(volume, mid_len)\nbuy_signal  = rsi_val < buy_th and volume > vol_ma\nsell_signal = rsi_val > sell_th`
     : base === "triple_ma"
     ? `ma_long = ta.sma(close, mid_len * 2)\nbuy_signal  = ta.crossover(ma_short, ma_mid) and ma_mid > ma_long\nsell_signal = ta.crossunder(ma_short, ma_mid) or ma_mid < ma_long`
     : `buy_signal  = ta.crossover(ma_short, ma_mid) and rsi_val < buy_th\nsell_signal = ta.crossunder(ma_short, ma_mid) or rsi_val > sell_th`;
 
-  return `//@version=5
-indicator("${name}", overlay=true)
+  return `//@version=6
+indicator(${JSON.stringify(name)}, overlay=true)
 
 // 파라미터
-short_len = input.int(${short}, "단기 MA 기간")
-mid_len   = input.int(${mid},   "중기 MA 기간")
-rsi_len   = input.int(${rsiLen}, "RSI 기간")
+short_len = input.int(${short}, "단기 MA 기간", minval=1)
+mid_len   = input.int(${mid},   "중기 MA 기간", minval=1)
+rsi_len   = input.int(${rsiLen}, "RSI 기간", minval=1)
 buy_th    = input.int(${buyTh}, "매수 RSI 임계값")
-sell_th   = input.int(100 - parseInt(buyTh), "매도 RSI 임계값")
+sell_th   = input.int(${100 - Number(buyTh)}, "매도 RSI 임계값")
 
 // 인디케이터 계산
 ma_short = ta.sma(close, short_len)
@@ -132,12 +284,40 @@ ${pySignal}
     return df`;
 }
 
+function renderPineCheck() {
+  const editor = document.getElementById("ci-pine-code");
+  const output = document.getElementById("ci-pine-check-result");
+  const { diagnostics, errors } = checkPineV6(editor.value);
+  output.replaceChildren();
+  const summary = document.createElement("p");
+  summary.textContent = errors ? `기본 문법 검사: 오류 ${errors}개` : "기본 문법 검사: 발견된 오류 없음 (컴파일 검증 전)";
+  summary.style.color = errors ? "var(--red)" : "var(--green)";
+  output.append(summary);
+  diagnostics.forEach(d => {
+    const button = document.createElement("button");
+    button.type = "button"; button.className = "block text-left text-xs mt-2";
+    button.textContent = `${d.line}행 ${d.column}열: ${d.message}`;
+    button.onclick = () => {
+      const lines = editor.value.split("\n");
+      const start = lines.slice(0, d.line - 1).reduce((n, v) => n + v.length + 1, 0) + d.column - 1;
+      editor.focus(); editor.setSelectionRange(start, start + 1);
+      editor.scrollTop = Math.max(0, (d.line - 3) * parseFloat(getComputedStyle(editor).lineHeight));
+    };
+    output.append(button);
+  });
+}
+document.getElementById("ci-check-pine").addEventListener("click", renderPineCheck);
+document.getElementById("ci-pine-code").addEventListener("input", () => {
+  document.getElementById("ci-pine-check-result").textContent = "코드가 변경되었습니다. 문법 체크를 다시 실행하세요.";
+});
+
 document.getElementById("ci-generate-btn").addEventListener("click", () => {
-  document.getElementById("ci-pine-code").textContent   = generatePineCode();
+  document.getElementById("ci-pine-code").value = generatePineCode();
+  renderPineCheck();
   document.getElementById("ci-python-code").textContent = generatePythonCode();
 });
 document.getElementById("ci-copy-pine").addEventListener("click", () => {
-  navigator.clipboard.writeText(document.getElementById("ci-pine-code").textContent);
+  navigator.clipboard.writeText(document.getElementById("ci-pine-code").value);
   setToast("PineScript 복사됨", "ok");
 });
 document.getElementById("ci-copy-py").addEventListener("click", () => {
@@ -183,7 +363,7 @@ generatePineCode && (() => {
   const py   = generatePythonCode();
   const pineEl = document.getElementById("ci-pine-code");
   const pyEl   = document.getElementById("ci-python-code");
-  if (pineEl) pineEl.textContent = pine;
+  if (pineEl) { pineEl.value = pine; renderPineCheck(); }
   if (pyEl)   pyEl.textContent   = py;
 })();
 

@@ -7,15 +7,14 @@ const GNB_MENUS = {
   agent: {
     label: "<i class='fa-solid fa-robot'></i> 로보 어드바이저",
     items: [
+      { key: "dashboard", icon: "fa-solid fa-gauge-high", label: "통합 대시보드" },
       { key: "agent-chat",      icon: "fa-solid fa-comments",              label: "AI 투자 상담" },
       { key: "robo-portfolio",  icon: "fa-solid fa-chart-pie",             label: "자산배분·최적화" },
       { key: "robo-rebalance",  icon: "fa-solid fa-rotate",                label: "리밸런싱 엔진" },
       { key: "robo-screening",  icon: "fa-solid fa-magnifying-glass-chart",label: "패턴 인식·종목 스크리닝" },
       { key: "robo-patterns",   icon: "fa-solid fa-chart-column",          label: "차트 패턴·지지/저항·멀티타임프레임" },
       { key: "robo-decision",   icon: "fa-solid fa-brain",                 label: "모의 투자 의사결정" },
-      { key: "agent-cb",        icon: "fa-solid fa-chart-bar",             label: "신용 리스크 분석" },
-      { key: "agent-products",  icon: "fa-solid fa-coins",                 label: "맞춤 상품 추천" },
-      { key: "agent-news",      icon: "fa-solid fa-newspaper",             label: "투자 정보 리서치" },
+      { key: "kis-monitor",     icon: "fa-solid fa-chart-line",            label: "KIS 모의투자결과" },
     ],
   },
   crawl: {
@@ -71,8 +70,6 @@ const GNB_MENUS = {
       { key: "indicator-custom",    icon: "fa-solid fa-code",           label: "커스텀 인디케이터 개발" },
       { key: "indicator-formula",   icon: "fa-solid fa-square-root-variable", label: "자유 산식 지표 (DSL·버전)" },
       { key: "indicator-backtest",  icon: "fa-solid fa-flask",          label: "성과 검증 (Python)" },
-      { key: "indicator-api",       icon: "fa-solid fa-plug",           label: "증권사 API 자동화" },
-      { key: "indicator-tradingview", icon: "fa-solid fa-satellite-dish", label: "TradingView 연동 (Webhook·교차검증)" },
       { key: "company-dashboard",   icon: "fa-solid fa-gauge",          label: "지표 대시보드" },
       { key: "company-compare",     icon: "fa-solid fa-table-columns",  label: "지표 비교 분석" },
       { key: "company-sector",      icon: "fa-solid fa-layer-group",    label: "섹터 인디케이터" },
@@ -110,6 +107,9 @@ const GNB_MENUS = {
     items: [
       { key: "sysadmin-dashboard", icon: "fa-solid fa-server",      label: "서버 대시보드" },
       { key: "sysadmin-logs",      icon: "fa-solid fa-scroll",      label: "감사 로그" },
+      // 2026-10-07 투자 인디케이터 LNB 에서 이동 — 외부 연동 설정은 시스템관리(더보기 오프캔버스)에서
+      { key: "indicator-api",       icon: "fa-solid fa-plug",           label: "증권사 API 자동화" },
+      { key: "indicator-tradingview", icon: "fa-solid fa-satellite-dish", label: "TradingView 연동 (Webhook·교차검증)" },
     ],
   },
 };
@@ -159,7 +159,7 @@ const TERMS = {
   signal:           { title: "매매 시그널", body: "지표·모델 계산 결과를 매수(BUY)/관망(HOLD)/매도(SELL) 중 하나로 요약한 최종 판단입니다." },
   backtest:         { title: "백테스트", body: "과거 시세 데이터에 전략 규칙을 그대로 적용해봤을 때 어떤 성과가 났을지 검증하는 과정입니다. 미래 수익을 보장하지 않으며, 과거 데이터에만 맞춰진 과적합에 유의해야 합니다." },
   virtual_account:  { title: "모의계좌", body: "실제 증권 계좌와 분리된, 앱 내부(MongoDB)에만 존재하는 가상의 잔고입니다. 자동매매 로직을 실 자금 없이 검증할 때 사용합니다." },
-  auto_trade_cycle: { title: "자동매매 사이클", body: "정해진 주기(기본 10분)마다 지표를 다시 계산하고, 시그널에 따라 자동으로 매수/매도를 실행하는 반복 루프입니다." },
+  auto_trade_cycle: { title: "자동매매 사이클", body: "정해진 주기(기본 3분)마다 지표를 다시 계산하고, 시그널에 따라 자동으로 매수/매도를 실행하는 반복 루프입니다." },
   notification_channel: { title: "알림 채널", body: "매매 체결·오류 등 이벤트가 발생했을 때 사용자에게 알려주는 통로(텔레그램/슬랙/이메일/카카오/SMS)입니다. 채널별로 토큰·API키를 등록해야 발송됩니다." },
   audit_log:        { title: "감사 로그", body: "누가 언제 어떤 주문·설정 변경을 했는지 기록해두는 이력입니다. 문제 발생 시 원인을 추적하는 데 사용합니다." },
   vix:              { title: "VIX (변동성 지수)", body: "S&P500 옵션 가격으로 산출하는 '공포 지수'입니다. 값이 높을수록 시장이 앞으로 크게 흔들릴 것이라는 불안 심리가 큰 상태입니다." },
@@ -175,9 +175,10 @@ const TERMS = {
 // ── 화면별 사용법 가이드 (43개 view 전체) ────────────────────────────
 const VIEW_GUIDES = {
   "agent-chat":      { summary: "금융 지식·데이터를 학습한 AI 로보 어드바이저에게 자유롭게 투자 관련 질문을 합니다.", steps: ["궁금한 내용을 채팅창에 입력 후 전송 버튼(또는 Enter)을 누르세요.", "신용점수, 금융상품, 퀀트 전략 등 여러 주제를 한 대화에서 섞어 물어봐도 됩니다.", "AI 답변은 참고용이며, 실제 투자 결정 전 반드시 스스로 데이터를 검증하세요."], relatedTerms: ["rag", "cb_score"] },
+  "kis-monitor":     { summary: "KIS 모의투자(Testbed) 자동매매만 모아서 봅니다 — 배치 상태, 계좌 잔고·보유, 봇 실주문·체결률·실현손익, 3분 사이클 이력, 로그와 실거래의 정합성.", steps: ["상단 배지에서 배치 실행·공격 모드·heartbeat(beat 생존)·환경(paper) 을 확인하세요.", "「봇 실주문」 표의 상태가 FILLED 면 KIS 에 체결된 것이고 UNKNOWN/LOST/ERROR 는 응답 미수신·실패입니다.", "「정합성」 패널에 불일치가 있으면 가상 장부와 KIS 실제 보유가 다른 것이니 사유를 확인하세요.", "60초 자동 새로고침을 켜 두면 사이클(3분)마다 새 거래가 반영됩니다."], relatedTerms: ["auto_trade_cycle", "slippage", "mdd"] },
   "robo-portfolio":  { summary: "위험 성향·투자기간·투자금액을 입력하면 AI가 자산배분 비중과 추천 종목을 계산합니다.", steps: ["위험 성향(안정/중립/공격)과 투자 기간, 투자금액을 선택하세요.", "'배분 계산' 버튼을 누르면 자산군별 비중과 추천 종목이 표시됩니다.", "기대수익률·MDD는 과거 데이터 기반 추정치이며 미래 수익을 보장하지 않습니다."], relatedTerms: ["covariance_opt", "mvo", "risk_parity", "mdd", "sharpe"] },
   "robo-screening":  { summary: "패턴 인식 모델로 대표 종목들을 매수/매도/관망으로 스크리닝합니다.", steps: ["모델(RSI/이동평균/볼린저/앙상블)과 신호 필터, 최소 신뢰도를 선택하세요.", "결과 카드에서 종목별 신호·점수·근거를 확인하세요.", "신뢰도가 높다고 100% 적중을 의미하지 않으니 다른 지표와 함께 판단하세요."], relatedTerms: ["signal", "lightgbm", "rsi", "golden_cross"] },
-  "robo-decision":   { summary: "자동매매 로직이 만든 모의투자 의사결정 과정을 로그로 확인합니다.", steps: ["시작 버튼을 누르면 10분 주기로 모의계좌 매매가 진행됩니다.", "로그에서 매수/매도 이유와 계좌 평가금액 변화를 확인하세요.", "실제 자금이 아닌 가상계좌이므로 전략을 안전하게 검증할 수 있습니다."], relatedTerms: ["virtual_account", "auto_trade_cycle", "signal"] },
+  "robo-decision":   { summary: "자동매매 로직이 만든 모의투자 의사결정 과정을 로그로 확인합니다.", steps: ["시작 버튼을 누르면 3분 주기로 모의계좌 매매가 진행됩니다.", "로그에서 매수/매도 이유와 계좌 평가금액 변화를 확인하세요.", "실제 자금이 아닌 가상계좌이므로 전략을 안전하게 검증할 수 있습니다."], relatedTerms: ["virtual_account", "auto_trade_cycle", "signal"] },
   "agent-cb":        { summary: "개인·기업 신용(CB) 통계를 조건별로 조회해 리스크를 참고합니다.", steps: ["개인 CB는 기간·성별·연령대를, 기업 CB는 기간·규모·업종코드를 선택하세요.", "'조회' 버튼을 누르면 해당 조건의 집계 통계가 표시됩니다."], relatedTerms: ["cb_score"] },
   "agent-products":  { summary: "위험 성향에 맞는 은행 수신상품·공모펀드를 검색합니다.", steps: ["상단 탭에서 '은행 수신상품' 또는 '공모펀드'를 선택하세요.", "최소금리(또는 최소수익률)와 키워드로 조건을 좁혀 검색하세요."], relatedTerms: [] },
   "agent-news":      { summary: "크롤링된 뉴스·리포트를 AI RAG로 검색해 투자 인사이트를 얻습니다.", steps: ["검색어(예: 금리 전망, 반도체 업황)를 입력 후 검색하세요.", "결과가 부족하면 '크롤링' 메뉴에서 먼저 관련 자료를 수집하세요."], relatedTerms: ["rag", "embedding", "qdrant"] },
@@ -194,7 +195,7 @@ const VIEW_GUIDES = {
   "quant-lean":      { summary: "Yahoo Finance 일봉을 QuantConnect LEAN 엔진(Docker)에서 실행해 전략 수익률·MDD·샤프를 검증합니다.", steps: ["예시를 고르거나 전략·티커·기간을 직접 입력하세요.", "'검증 실행'을 누르면 LEAN 컨테이너가 실행되고(수 분 소요) pandas 지표와 함께 결과가 표시됩니다.", "LEAN이 연결되지 않은 환경에서는 pandas 계산 결과만 표시됩니다."], relatedTerms: ["backtest", "sharpe", "mdd"] },
   "trading-order":   { summary: "가상 잔고로 매수/매도 주문을 내고 체결 내역을 확인합니다.", steps: ["매수/매도, 수량, 가격을 입력해 주문하세요.", "증권사 API를 연동하면 실제 계좌 데이터로도 확인할 수 있습니다."], relatedTerms: ["broker_api", "paper_trading"] },
   "quant-dashboard": { summary: "대표 종목들의 실시간 시세와 퀀트 시그널을 한눈에 봅니다.", steps: ["시장 지수 카드와 종목별 매수/매도 시그널 카드를 확인하세요.", "차트에서 종목을 바꿔가며 지표 흐름을 살펴보세요."], relatedTerms: ["signal", "rsi", "ma"] },
-  "quant-auto":      { summary: "10분 주기 자동매매를 시작/중지하고 실행 로그를 확인합니다.", steps: ["'시작'을 누르면 설정된 종목·전략으로 자동매매가 실행됩니다.", "로그에서 각 사이클의 매매 내역과 사유를 확인하세요.", "실거래 전 반드시 '증권사 API 설정'에서 모의(paper) 모드로 충분히 검증하세요."], relatedTerms: ["auto_trade_cycle", "virtual_account", "paper_trading"] },
+  "quant-auto":      { summary: "3분 주기 자동매매를 시작/중지하고 실행 로그를 확인합니다.", steps: ["'시작'을 누르면 설정된 종목·전략으로 자동매매가 실행됩니다.", "로그에서 각 사이클의 매매 내역과 사유를 확인하세요.", "실거래 전 반드시 '증권사 API 설정'에서 모의(paper) 모드로 충분히 검증하세요."], relatedTerms: ["auto_trade_cycle", "virtual_account", "paper_trading"] },
   "quant-backtest":  { summary: "선택한 종목에 규칙 기반 시그널을 적용해 10년치 백테스트 성과를 확인합니다.", steps: ["종목을 선택하고 '백테스트 실행'을 누르세요.", "누적수익률·샤프지수·MDD·승률을 Buy&Hold와 비교해보세요."], relatedTerms: ["backtest", "sharpe", "mdd", "win_rate"] },
   "settings":        { summary: "실거래를 위한 증권사 API 키(앱키/시크릿키/계좌번호)를 등록합니다.", steps: ["증권사를 선택하고 발급받은 앱키·시크릿키를 입력하세요.", "'연결 테스트'로 정상 연동 여부를 먼저 확인한 뒤 저장하세요.", "모의(paper) 모드로 충분히 테스트한 후 실거래로 전환하는 것을 권장합니다."], relatedTerms: ["broker_api", "broker_catalog", "paper_trading"] },
   "notification-settings": { summary: "매매 체결·오류 등을 텔레그램/슬랙/이메일/카카오/SMS로 받을 채널을 설정합니다.", steps: ["채널별 토큰/웹훅 등 필요한 값을 입력 후 저장하세요.", "'테스트 발송'으로 실제 수신 여부를 확인하세요."], relatedTerms: ["notification_channel"] },
@@ -212,7 +213,7 @@ const VIEW_GUIDES = {
   "indicator-api":   { summary: "완성한 인디케이터 전략을 증권사 API와 연결해 자동화하는 방법을 안내합니다.", steps: ["3단계 아키텍처(신호 계산→주문 생성→증권사 API 전송)를 확인하세요.", "하단에서 증권사 키를 등록하고 연결을 테스트하세요."], relatedTerms: ["broker_api", "custom_indicator"] },
   "company-dashboard": { summary: "기업의 개요·밸류에이션·수익성 지표를 한 화면에서 확인합니다.", steps: ["상단에서 기업을 선택하세요.", "개요/밸류에이션/수익성 탭과 분기·재무상태표 데이터를 확인하세요."], relatedTerms: ["dcf", "fcf"] },
   "company-compare": { summary: "여러 기업의 핵심 지표를 표로 나란히 비교합니다.", steps: ["비교 표에서 기업별 지표 값을 확인하며 상대적 위치를 파악하세요."], relatedTerms: ["dcf", "eva"] },
-  "company-sector":  { summary: "산업 섹터별 대표 지표와 흐름을 카드로 확인합니다.", steps: ["섹터 카드를 둘러보며 산업별 상대 강도를 비교하세요."], relatedTerms: ["sector_etf"] },
+  "company-sector":  { summary: "자동매매 유니버스(31종목)를 섹터로 묶어 밸류에이션·수익성·성장·재무안정성·가격모멘텀·시장폭을 실제 펀더멘털·일봉에서 집계하고, 섹터 간 상대점수와 판단 근거를 보여줍니다.", steps: ["섹터 비교 표에서 상대점수·판정과 PER·ROE·3개월 수익률을 한 줄로 비교하세요.", "섹터 카드의 팩터 점수 막대(모멘텀·수익성·성장·밸류에이션·안정성)로 어느 요인이 점수를 끌어올렸는지 봅니다.", "「판단 근거」는 계산된 수치를 그대로 인용한 문장이고, 그 아래 📡 줄에 데이터 출처·기준일·결측 종목 수가 적혀 있습니다.", "구성종목 상세를 펼치면 종목별 비중·PER·ROE·수익률·추세를 확인할 수 있습니다."], relatedTerms: ["per", "pbr", "roe", "rsi", "ma"] },
   "ml-compare":      { summary: "7종 ML 모델의 5-fold 교차검증 정확도를 비교합니다.", steps: ["종목·기간을 선택하고 '모델 비교 실행'을 누르세요.", "정확도 순위표에서 어떤 모델이 이 종목에 가장 잘 맞는지 확인하세요.", "'비교에 추가'로 여러 실행 결과를 모아 볼 수 있습니다."], relatedTerms: ["cross_validation", "lightgbm", "mlp", "stacking"] },
   "ml-regression":   { summary: "선형회귀·Ridge·Lasso·SVR로 향후 수익률을 예측하고 오차를 비교합니다.", steps: ["종목·기간을 선택해 실행하면 모델별 예측값과 RMSE/MAE가 표시됩니다.", "오차가 작을수록 해당 구간에서 예측력이 높았다는 의미입니다."], relatedTerms: ["regression", "ridge_lasso"] },
   "ml-cluster":      { summary: "수익률·변동성 패턴이 비슷한 종목끼리 KMeans(및 DBSCAN 이상치 탐지)로 군집화합니다.", steps: ["대상 종목을 선택(또는 기본값 사용)하고 '군집화 실행'을 누르세요.", "같은 군집으로 묶인 종목들의 공통 특징을 해석해보세요.", "DBSCAN 결과의 '이상치'는 다른 종목과 패턴이 크게 다른 종목입니다."], relatedTerms: ["kmeans", "dbscan"] },
@@ -372,24 +373,45 @@ function renderLnb(gnbKey) {
   });
 }
 
-// GNB 더보기 offcanvas (금융 지식 / 시스템 — LNB 스타일 재사용)
+// 더보기: 메뉴 그룹 → 세부 화면
 (function () {
   const backdrop = document.getElementById("gnb-offcanvas-backdrop");
   const panel = document.getElementById("gnb-offcanvas");
+  const trigger = document.getElementById("gnb-more-btn");
+  const nav = document.getElementById("gnb-offcanvas-nav");
+  trigger.setAttribute("aria-controls", panel.id);
+  trigger.setAttribute("aria-expanded", "false");
+  panel.inert = true;
+  nav.innerHTML = Object.entries(GNB_MENUS).filter(([key]) => !["agent", "company"].includes(key)).map(([key, menu]) => `
+    <details class="offcanvas-group" data-menu-group="${key}">
+      <summary class="lnb-item">${menu.label}<i class="fa-solid fa-chevron-down offcanvas-chevron"></i></summary>
+      <div class="offcanvas-submenu">${menu.items.map(it => `<button type="button" class="lnb-item" data-menu-view="${it.key}"><i class="${it.icon}"></i><span>${it.label}</span></button>`).join("")}</div>
+    </details>`).join("");
   function openOffcanvas() {
+    panel.inert = false;
     panel.classList.add("open");
     backdrop.classList.add("open");
+    trigger.setAttribute("aria-expanded", "true");
+    nav.querySelectorAll("details").forEach(group => { group.open = group.dataset.menuGroup === currentGnb; });
+    document.getElementById("gnb-offcanvas-close").focus();
   }
   function closeOffcanvas() {
+    trigger.focus();
     panel.classList.remove("open");
     backdrop.classList.remove("open");
+    panel.inert = true;
+    trigger.setAttribute("aria-expanded", "false");
   }
-  document.getElementById("gnb-more-btn").addEventListener("click", openOffcanvas);
+  trigger.addEventListener("click", openOffcanvas);
   document.getElementById("gnb-offcanvas-close").addEventListener("click", closeOffcanvas);
   backdrop.addEventListener("click", closeOffcanvas);
-  // 항목 선택(금융 지식/시스템)은 기존 [data-gnb] 클릭 리스너가 네비게이션을 처리하고,
-  // 여기서는 선택 후 패널만 닫아준다.
-  panel.querySelectorAll("[data-gnb]").forEach(el => el.addEventListener("click", closeOffcanvas));
+  nav.addEventListener("click", event => {
+    const item = event.target.closest("[data-menu-view]");
+    if (item) { navigate(item.dataset.menuView); closeOffcanvas(); }
+  });
+  document.addEventListener("keydown", event => {
+    if (event.key === "Escape" && panel.classList.contains("open")) closeOffcanvas();
+  });
 })();
 
 // LNB 토글 (접기/펼치기)
@@ -415,6 +437,17 @@ function navigate(viewKey) {
   document.querySelectorAll("[data-gnb]").forEach(el => {
     el.classList.toggle("active", el.dataset.gnb === currentGnb);
   });
+
+  document.querySelectorAll("[data-menu-group]").forEach(el => {
+    el.classList.toggle("active", el.dataset.menuGroup === currentGnb);
+  });
+  document.querySelectorAll("[data-menu-view]").forEach(el => {
+    const active = el.dataset.menuView === currentView;
+    el.classList.toggle("active", active);
+    if (active) el.setAttribute("aria-current", "page");
+    else el.removeAttribute("aria-current");
+  });
+  document.getElementById("gnb-more-btn").classList.toggle("active", !["agent", "company"].includes(currentGnb));
 
   // Update LNB
   renderLnb(currentGnb);
@@ -547,4 +580,4 @@ let _viewActivated = () => {};
 export function registerViewActivation(fn) { _viewActivated = fn; }
 
 
-export { compareTrayAdd, loadMarketTicker, loadSyncStatus, navigate, renderCompareTrayAll, tt };
+export { GNB_MENUS, compareTrayAdd, loadMarketTicker, loadSyncStatus, navigate, renderCompareTrayAll, tt };
