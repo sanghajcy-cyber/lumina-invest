@@ -16,7 +16,7 @@ from app.config import settings
 from app.database.neo4j import connect_neo4j, close_neo4j, ensure_graph_schema
 from app.lib.redis_cache import connect_redis, close_redis
 from app.lib.session import COOKIE_NAME, SessionCookieRefreshMiddleware, get_session
-from app.routes import auth, health, chat, stocks, library, admin, system, quant, financials, ml, macro, documents, notification, graph, conversations, tasks, ingest, paper, openapi, lean, kis_monitor 6e26041e27a019a066acfa439add317c9a1500bb
+from app.routes import auth, health, chat, stocks, library, admin, system, quant, financials, ml, macro, documents, notification, graph, conversations, tasks, ingest, paper, openapi, lean, kis_monitor
 from app.services.graph_service import seed_graph
 from app.services.sync_scheduler import start_sync_scheduler, stop_sync_scheduler
 
