@@ -30,6 +30,7 @@ from app.lib.llm_client import OpenAIClient, get_llm_client
 from app.lib.user_state import get_active_conversation, set_active_conversation
 from app.services.langgraph_agent import run_agent
 from app.services.rag_pipeline import rag_search
+from app.services.dart_rag import dart_search_for_question
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
@@ -44,6 +45,7 @@ LlmMode = Literal["ollama", "openai", "rag"]
 
 class ChatBody(BaseModel):
     question: str
+    as_of: Optional[str] = None  # DART 공시 기준일 YYYYMMDD (없으면 KST 오늘)
     history: list[dict] = []
     use_rag: bool = True
     conversation_id: Optional[str] = None  # 없으면 자동 생성
@@ -165,6 +167,7 @@ async def chat(
     # LangChain RAG 검색 (Qdrant) – rag 모드는 항상 검색
     rag_context = ""
     docs: list[dict] = []
+    dart_error: Optional[str] = None
     if body.use_rag or body.llm_mode == "rag":
         try:
             docs = await rag_search(body.question, top_k=settings.TOP_K)
@@ -174,6 +177,15 @@ async def chat(
                 )
         except Exception:
             docs = []
+
+        # DART 공시 RAG: 종목이 식별된 경우에만 rag_search 와 별도로 추가 검색한다.
+        # 실패는 빈 결과로 위장하지 않고 로그 + 응답의 dart_error 로 드러낸다.
+        dart_docs, dart_error = await dart_search_for_question(body.question, as_of=body.as_of)
+        if dart_docs:
+            docs = docs + dart_docs
+            rag_context = "\n\n".join(
+                f"[{d['title']}] {d['text'][:500]}" for d in docs
+            )
 
     if body.llm_mode == "rag":
         # RAG 모드도 공통 Qwen으로 검색 근거를 설명한다.
@@ -230,6 +242,9 @@ async def chat(
         except Exception as e:
             raise HTTPException(500, f"에이전트 오류 ({llm_label}): {str(e)[:200]}")
 
+    if dart_error:
+        result["dart_error"] = dart_error
+
     # PostgreSQL – 메시지 저장 (conversation_id 포함)
     try:
         db.add(Chat(
@@ -282,15 +297,20 @@ async def chat_async(
         history = await _build_history_from_db(db, conversation_id, user_id, limit=10)
 
     rag_context = ""
+    docs: list[dict] = []
+    dart_error: Optional[str] = None
     if body.use_rag:
         try:
             docs = await rag_search(body.question, top_k=settings.TOP_K)
-            if docs:
-                rag_context = "\n\n".join(
-                    f"[{d['title']}] {d['text'][:500]}" for d in docs
-                )
         except Exception:
             pass
+
+        dart_docs, dart_error = await dart_search_for_question(body.question, as_of=body.as_of)
+        docs = docs + dart_docs
+        if docs:
+            rag_context = "\n\n".join(
+                f"[{d['title']}] {d['text'][:500]}" for d in docs
+            )
 
     task = run_agent_task.delay(
         user_id=user_id,
@@ -305,4 +325,5 @@ async def chat_async(
         "task_id": task.id,
         "conversation_id": conversation_id,
         "poll_url": f"/api/tasks/{task.id}",
+        **({"dart_error": dart_error} if dart_error else {}),
     }

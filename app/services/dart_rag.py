@@ -210,3 +210,72 @@ async def dart_search(query: str, stock_code: str, *, as_of: str | None = None, 
         if len(results) == top_k:
             break
     return results
+
+
+
+# ── 채팅 연동 헬퍼 ───────────────────────────────────────────────────
+import logging as _logging
+import re as _re
+from datetime import datetime as _datetime, timedelta as _timedelta, timezone as _timezone
+
+_log = _logging.getLogger(__name__)
+_KST = _timezone(_timedelta(hours=9))
+MAX_CHAT_STOCKS = 2          # 질문 하나에서 DART 를 검색할 최대 종목 수
+CHAT_TOP_K_PER_STOCK = 3     # 종목당 반환 청크 수
+
+
+def kst_today() -> str:
+    return _datetime.now(_KST).strftime("%Y%m%d")
+
+
+def resolve_dart_stocks(question: str) -> list[str]:
+    """질문에서 DART 검색 대상 6자리 종목코드를 뽑는다 (질문 속 등장 순서, 최대 MAX_CHAT_STOCKS).
+
+    extract_mentioned_symbols 는 부분 문자열 매칭이라 'SK하이닉스' 에서 'SK' 도 잡힌다.
+    다른 매칭 이름에 포함되는 더 짧은 이름은 버린다. 심볼의 '.KS' 같은 접미사는 제거한다.
+    """
+    from app.services.graph_service import _COMPANIES, extract_mentioned_symbols
+
+    names = {c["symbol"]: c["name"] for c in _COMPANIES}
+    syms = list(dict.fromkeys(extract_mentioned_symbols(question)))
+    keep = [s for s in syms
+            if not any(names[s] != names[o] and names[s] in names[o] for o in syms)]
+    keep.sort(key=lambda s: question.find(names[s]))
+    codes: list[str] = []
+    for s in keep:
+        code = s.split(".")[0]
+        if len(code) == 6 and code.isdigit() and code not in codes:
+            codes.append(code)
+    return codes[:MAX_CHAT_STOCKS]
+
+
+async def dart_search_for_question(question: str, *, as_of: str | None = None,
+                                   top_k_per_stock: int = CHAT_TOP_K_PER_STOCK):
+    """채팅용: (docs, error) 를 돌려준다. 이 함수는 예외를 던지지 않는다.
+
+    - 종목이 식별되지 않으면 ([], None): DART 검색을 건너뛴다.
+    - 실패하면 빈 결과로 위장하지 않고 error 문자열을 돌려준다 (호출부가 응답에 싣는다).
+    - as_of 가 없으면 KST 오늘.
+    """
+    if as_of is not None and not _re.fullmatch(r"\d{8}", as_of):
+        return [], "as_of 는 YYYYMMDD 형식이어야 합니다."
+    try:
+        codes = resolve_dart_stocks(question)
+    except Exception:
+        _log.exception("DART 종목 식별 실패")
+        return [], "DART 종목 식별 중 오류가 발생했습니다."
+    if not codes:
+        return [], None
+
+    as_of = as_of or kst_today()
+    docs: list[dict] = []
+    for code in codes:
+        try:
+            docs.extend(await dart_search(question, code, as_of=as_of, top_k=top_k_per_stock))
+        except DartRagError as exc:
+            _log.error("DART 검색 실패 stock=%s as_of=%s: %s", code, as_of, exc)
+            return docs, f"DART 검색 실패: {exc}"
+        except Exception:
+            _log.exception("DART 검색 중 예기치 않은 오류 stock=%s", code)
+            return docs, "DART 검색 중 예기치 않은 오류가 발생했습니다."
+    return docs, None

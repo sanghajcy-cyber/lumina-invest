@@ -223,3 +223,125 @@ def test_unknown_mode_rejected(chat_app):
     client, _ = chat_app
     res = client.post("/api/chat", json={"question": "q", "llm_mode": "claude"})
     assert res.status_code == 422
+
+
+
+# ── DART 공시 RAG 연동 ───────────────────────────────────────────────
+
+@pytest.fixture(autouse=True)
+def _no_real_dart(monkeypatch):
+    """기본은 DART 검색을 끈다 (테스트가 실제 Qdrant/OpenAI 를 호출하지 않도록). DART 테스트는 개별로 덮어쓴다."""
+    async def none(*a, **k):
+        return [], None
+    monkeypatch.setattr(chat_mod, "dart_search_for_question", none)
+
+
+DART_DOC = {
+    "text": "삼성전자 주요 제품은 DX 부문과 DS 부문으로 구분됩니다.",
+    "title": "삼성전자 반기보고서 2026 2Q | II. 사업의 내용 > 주요 제품 및 서비스",
+    "source": "dart:20260814003699",
+    "score": 0.687,
+    "url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260814003699",
+    "stock_code": "005930",
+}
+
+
+def test_rag_mode_merges_dart_docs(chat_app, monkeypatch):
+    client, calls = chat_app
+    seen = {}
+
+    async def fake_dart(question, *, as_of=None, **k):
+        seen["q"], seen["as_of"] = question, as_of
+        return [DART_DOC], None
+
+    monkeypatch.setattr(chat_mod, "dart_search_for_question", fake_dart)
+    res = client.post("/api/chat", json={"question": "삼성전자 실적", "llm_mode": "rag", "as_of": "20220331"})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert len(body["chunks"]) == 3                       # rag_search 2건 + DART 1건
+    assert body["chunks"][-1]["source"] == "dart:20260814003699"
+    assert body["citations"][-1]["url"].startswith("https://dart.fss.or.kr/")
+    assert "dart_error" not in body
+    assert seen == {"q": "삼성전자 실적", "as_of": "20220331"}
+    assert calls["rag"] == ["삼성전자 실적"]                # 기존 rag_search 는 그대로 호출된다
+
+
+def test_dart_failure_is_surfaced_and_rag_results_kept(chat_app, monkeypatch):
+    client, _ = chat_app
+
+    async def failing(*a, **k):
+        return [], "DART 검색 실패: 서버 OPENAI_API_KEY가 설정되지 않았습니다"
+
+    monkeypatch.setattr(chat_mod, "dart_search_for_question", failing)
+    res = client.post("/api/chat", json={"question": "삼성전자 실적", "llm_mode": "rag"})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["dart_error"].startswith("DART 검색 실패")
+    assert len(body["chunks"]) == 2                       # 기존 검색 결과는 유지
+
+
+def test_ollama_mode_puts_dart_into_rag_context(chat_app, monkeypatch):
+    client, calls = chat_app
+
+    async def fake_dart(question, *, as_of=None, **k):
+        return [DART_DOC], None
+
+    monkeypatch.setattr(chat_mod, "dart_search_for_question", fake_dart)
+    res = client.post("/api/chat", json={"question": "삼성전자 실적"})
+    assert res.status_code == 200, res.text
+    ctx = calls["agent"][0]["rag_context"]
+    assert "삼성전자 실적" in ctx                           # 기존 근거
+    assert DART_DOC["title"] in ctx and "DX 부문" in ctx   # DART 근거
+
+
+def test_dart_not_called_when_rag_disabled_outside_rag_mode(chat_app, monkeypatch):
+    client, calls = chat_app
+    called = []
+
+    async def spy(*a, **k):
+        called.append(a)
+        return [DART_DOC], None
+
+    monkeypatch.setattr(chat_mod, "dart_search_for_question", spy)
+    res = client.post("/api/chat", json={"question": "삼성전자 실적", "use_rag": False})
+    assert res.status_code == 200, res.text
+    assert called == []
+    assert calls["agent"][0]["rag_context"] == ""
+
+
+def test_dart_helper_skips_when_no_company(monkeypatch):
+    import asyncio
+    from app.services import dart_rag
+
+    async def boom(*a, **k):
+        raise AssertionError("종목이 없으면 dart_search 를 호출하면 안 된다")
+
+    monkeypatch.setattr(dart_rag, "dart_search", boom)
+    assert asyncio.run(dart_rag.dart_search_for_question("요즘 금리 전망 알려줘")) == ([], None)
+
+
+def test_dart_helper_passes_codes_and_as_of(monkeypatch):
+    import asyncio
+    from app.services import dart_rag
+    calls = []
+
+    async def fake(query, stock_code, *, as_of=None, top_k=5, **k):
+        calls.append((stock_code, as_of, top_k))
+        return [{"stock_code": stock_code}]
+
+    monkeypatch.setattr(dart_rag, "dart_search", fake)
+    docs, err = asyncio.run(dart_rag.dart_search_for_question("삼성전자와 SK하이닉스 비교", as_of="20220331"))
+    assert err is None and len(docs) == 2
+    assert calls == [("005930", "20220331", 3), ("000660", "20220331", 3)]   # SK(034730) 오탐 없음, .KS 접미사 제거
+
+
+def test_dart_helper_returns_error_instead_of_raising(monkeypatch):
+    import asyncio
+    from app.services import dart_rag
+
+    async def fail(*a, **k):
+        raise dart_rag.DartCollectionError("컬렉션 없음")
+
+    monkeypatch.setattr(dart_rag, "dart_search", fail)
+    docs, err = asyncio.run(dart_rag.dart_search_for_question("삼성전자 사업 내용"))
+    assert docs == [] and "컬렉션 없음" in err
