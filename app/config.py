@@ -55,8 +55,9 @@ class Settings(BaseSettings):
     DOCUMENT_COLLECTION: str = "fin_chunks"  # Qdrant collection for uploaded documents
 
     # DART 공시 RAG (api-test1-project 파이프라인이 만든 컬렉션). 질의 임베딩은 컬렉션과 같은 모델
-    # (text-embedding-3-small, 1536차원)을 서버 OPENAI_API_KEY 로 강제한다. 사용자 브라우저 키는 쓰지 않는다.
+    # (text-embedding-3-small, 1536차원)을 서버 전용 DART_OPENAI_API_KEY 로 강제한다(채팅용 OPENAI_API_KEY 는 쓰지 않는다). 사용자 브라우저 키는 쓰지 않는다.
     DART_COLLECTION: str = "dart_disclosures_3small_v3"
+    DART_OPENAI_API_KEY: str = ""  # DART 질의 임베딩 전용. OPENAI_API_KEY 로 대체(fallback)하지 않는다.
     DART_OPENAI_BASE_URL: str = "https://api.openai.com"
 
     DATA_DIR: str = "./data"

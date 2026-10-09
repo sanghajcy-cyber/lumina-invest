@@ -18,6 +18,7 @@ build/
 .env
 .env.dev
 .env.local
+.env.dart
 
 # Data (large CSV files)
 data/09*/

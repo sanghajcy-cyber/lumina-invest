@@ -1,7 +1,7 @@
 """DART 공시 RAG 검색 (Qdrant 컬렉션 settings.DART_COLLECTION, 기본 dart_disclosures_3small_v3).
 
 기존 rag_pipeline.rag_search(Ollama nomic-embed-text 768차원, fin_chunks/law_chunks)와 완전히 분리된 경로다.
-- 질의 임베딩은 컬렉션을 만든 모델(text-embedding-3-small, 1536차원)로 서버 OPENAI_API_KEY를 써서 강제한다.
+- 질의 임베딩은 컬렉션을 만든 모델(text-embedding-3-small, 1536차원)로 서버 전용 DART_OPENAI_API_KEY를 써서 강제한다 (OPENAI_API_KEY 로 fallback 하지 않는다).
   사용자(브라우저) 키는 쓰지 않는다. 채팅/최종 LLM 호출의 키 정책과 무관하다.
 - 컬렉션을 자동 생성하지 않는다. 없거나 차원/거리가 다르면 DartCollectionError로 실패한다.
 - 예외를 삼켜 빈 목록으로 바꾸지 않는다. 빈 목록은 "기준일에 유효한 공시가 없음"일 때만 반환된다.
@@ -76,9 +76,12 @@ def _error_type(resp: httpx.Response) -> str:
 
 
 def _server_key() -> str:
-    key = (settings.OPENAI_API_KEY or "").strip()
+    # 채팅용 OPENAI_API_KEY 와 분리된 DART 전용 키만 쓴다. 없으면 대체하지 않고 명시적으로 실패한다.
+    key = (settings.DART_OPENAI_API_KEY or "").strip()
     if not key:
-        raise DartEmbeddingError("서버 OPENAI_API_KEY가 설정되지 않았습니다 (DART 질의 임베딩은 서버 키를 사용합니다).")
+        raise DartEmbeddingError(
+            "DART_OPENAI_API_KEY가 설정되지 않았습니다 (DART 질의 임베딩은 DART 전용 서버 키를 사용하며 OPENAI_API_KEY로 대체하지 않습니다)."
+        )
     return key
 
 

@@ -345,3 +345,31 @@ def test_dart_helper_returns_error_instead_of_raising(monkeypatch):
     monkeypatch.setattr(dart_rag, "dart_search", fail)
     docs, err = asyncio.run(dart_rag.dart_search_for_question("삼성전자 사업 내용"))
     assert docs == [] and "컬렉션 없음" in err
+
+
+
+def test_dart_embedding_uses_only_dart_key(monkeypatch):
+    import asyncio
+    from app.services import dart_rag
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-chat-only")
+    monkeypatch.setattr(settings, "DART_OPENAI_API_KEY", "")
+    with pytest.raises(dart_rag.DartEmbeddingError) as ei:
+        asyncio.run(dart_rag._embed_query("q"))
+    assert "DART_OPENAI_API_KEY" in str(ei.value)
+    assert "sk-chat-only" not in str(ei.value)             # 키 값은 메시지에 나오지 않는다
+
+
+def test_dart_server_key_reads_dart_setting(monkeypatch):
+    from app.services import dart_rag
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "")
+    monkeypatch.setattr(settings, "DART_OPENAI_API_KEY", "  sk-dart  ")
+    assert dart_rag._server_key() == "sk-dart"
+
+
+def test_chat_openai_key_policy_unaffected_by_dart_key(chat_app, monkeypatch):
+    client, calls = chat_app
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "")
+    monkeypatch.setattr(settings, "DART_OPENAI_API_KEY", "sk-dart")
+    res = client.post("/api/chat", json={"question": "안녕", "llm_mode": "openai"})
+    assert res.status_code == 400                           # DART 키가 있어도 사용자 키 없는 openai 모드는 거부
+    assert calls["agent"] == []
