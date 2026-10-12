@@ -232,24 +232,13 @@ def kst_today() -> str:
 
 
 def resolve_dart_stocks(question: str) -> list[str]:
-    """질문에서 DART 검색 대상 6자리 종목코드를 뽑는다 (질문 속 등장 순서, 최대 MAX_CHAT_STOCKS).
+    """질문에서 DART 검색 대상 종목코드를 뽑는다 (질문 속 등장 순서, 최대 MAX_CHAT_STOCKS).
 
-    extract_mentioned_symbols 는 부분 문자열 매칭이라 'SK하이닉스' 에서 'SK' 도 잡힌다.
-    다른 매칭 이름에 포함되는 더 짧은 이름은 버린다. 심볼의 '.KS' 같은 접미사는 제거한다.
+    graph_service 의 15종목 매칭과 독립이다. 규칙은 app/services/dart_stock_resolver.py 참고.
     """
-    from app.services.graph_service import _COMPANIES, extract_mentioned_symbols
+    from app.services.dart_stock_resolver import resolve_stock_codes
 
-    names = {c["symbol"]: c["name"] for c in _COMPANIES}
-    syms = list(dict.fromkeys(extract_mentioned_symbols(question)))
-    keep = [s for s in syms
-            if not any(names[s] != names[o] and names[s] in names[o] for o in syms)]
-    keep.sort(key=lambda s: question.find(names[s]))
-    codes: list[str] = []
-    for s in keep:
-        code = s.split(".")[0]
-        if len(code) == 6 and code.isdigit() and code not in codes:
-            codes.append(code)
-    return codes[:MAX_CHAT_STOCKS]
+    return resolve_stock_codes(question)[:MAX_CHAT_STOCKS]
 
 
 async def dart_search_for_question(question: str, *, as_of: str | None = None,
