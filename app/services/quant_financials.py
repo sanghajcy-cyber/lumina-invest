@@ -30,6 +30,19 @@ from app.models import (
 DEFAULT_STRATEGY_VERSION = "composite_v1"
 
 
+def valuation_as_of_for(factor_as_of: datetime.date) -> datetime.date:
+    """factor_scores.as_of_date 에 짝이 되는 valuation_metrics.as_of_date.
+
+    valuation_metrics 는 월초(1일) 일자 체계다. composite_v1 은 같은 월초 일자를 쓰므로 그대로,
+    composite_v2 는 선택일(월말)을 쓰므로 다음 달 1일의 valuation 과 짝지운다 (예: 2026-07-31 -> 2026-08-01).
+    """
+    if factor_as_of.day == 1:
+        return factor_as_of
+    if factor_as_of.month == 12:
+        return datetime.date(factor_as_of.year + 1, 1, 1)
+    return datetime.date(factor_as_of.year, factor_as_of.month + 1, 1)
+
+
 def _num(v: Any) -> Any:
     """Decimal -> float (JSON 직렬화 용이하게). None은 그대로 통과."""
     if isinstance(v, Decimal):
@@ -273,13 +286,14 @@ async def screen_by_composite_score(
         if as_of_date is None:
             return {"as_of_date": None, "strategy_version": strategy_version, "items": []}
 
+    valuation_as_of = valuation_as_of_for(as_of_date)
     stmt = (
         select(FactorScore, Company, ValuationMetric)
         .join(Company, Company.stock_code == FactorScore.stock_code)
         .outerjoin(
             ValuationMetric,
             (ValuationMetric.stock_code == FactorScore.stock_code)
-            & (ValuationMetric.as_of_date == FactorScore.as_of_date),
+            & (ValuationMetric.as_of_date == valuation_as_of),
         )
         .where(
             FactorScore.strategy_version == strategy_version,
@@ -313,4 +327,5 @@ async def screen_by_composite_score(
             "per": _num(valuation.per) if valuation else None,
             "pbr": _num(valuation.pbr) if valuation else None,
         })
-    return {"as_of_date": as_of_date.isoformat(), "strategy_version": strategy_version, "items": items}
+    return {"as_of_date": as_of_date.isoformat(), "valuation_as_of_date": valuation_as_of.isoformat(),
+            "strategy_version": strategy_version, "items": items}
