@@ -162,5 +162,7 @@ class FactorScore(Base):
     value_score: Mapped[Optional[float]] = mapped_column(Numeric(10, 4))
     growth_score: Mapped[Optional[float]] = mapped_column(Numeric(10, 4))
     composite_score: Mapped[Optional[float]] = mapped_column(Numeric(10, 4))
+    # 같은 strategy_version/as_of_date 안에서 WICS 섹터(wics_code) 내 상대 순위.
+    # composite_top_pct = rank / 섹터 내 종목수 * 100 (전체 시장 순위가 아님).
     composite_rank: Mapped[Optional[int]] = mapped_column(Integer)
     composite_top_pct: Mapped[Optional[float]] = mapped_column(Numeric(10, 4))

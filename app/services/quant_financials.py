@@ -12,6 +12,7 @@ financial_facts(원본 XBRL, 184만 행)는 여기서 직접 노출하지 않는
 from __future__ import annotations
 
 import datetime
+import os
 from decimal import Decimal
 from typing import Any, Optional
 
@@ -27,7 +28,19 @@ from app.models import (
     ValuationMetric,
 )
 
-DEFAULT_STRATEGY_VERSION = "composite_v1"
+ENV_DEFAULT_STRATEGY_VERSION = "QUANT_DEFAULT_STRATEGY_VERSION"
+
+
+def _default_strategy_version() -> str:
+    """서비스 기본 strategy_version. 환경변수가 비어 있으면 composite_v1 (롤백 = 환경변수 제거 후 재시작).
+
+    import 시점에 한 번 읽는다. 값을 바꾸려면 프로세스 재시작이 필요하다.
+    """
+    v = (os.environ.get(ENV_DEFAULT_STRATEGY_VERSION) or "").strip()
+    return v or "composite_v1"
+
+
+DEFAULT_STRATEGY_VERSION = _default_strategy_version()
 
 
 def valuation_as_of_for(factor_as_of: datetime.date) -> datetime.date:
