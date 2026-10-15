@@ -98,6 +98,7 @@ services:
     - LEAN_MODE=${LEAN_MODE:-auto}
     - LEAN_WORKDIR=/app/data/lean-workflows
     - LEAN_DOCKER_VOLUME=lean-workflows
+    - QUANT_DEFAULT_STRATEGY_VERSION=${QUANT_DEFAULT_STRATEGY_VERSION:-composite_v1}
     extra_hosts:
     - host.docker.internal:host-gateway
     volumes:
