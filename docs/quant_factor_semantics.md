@@ -13,6 +13,10 @@
   월초는 같은 날짜, 그 외는 다음 달 1일 (예: 2026-07-31 -> 2026-08-01, 2025-12-31 -> 2026-01-01).
 - 응답의 `valuation_as_of_date` 로 실제 사용된 valuation 일자를 확인할 수 있다.
 - composite_score 는 성장 지표에 TTM 이력이 필요해 2025-03 이후부터 실질적으로 채워진다.
+- valuation 의 가격 기준일: valuation_metrics 의 per/pbr 등은 그 행 `as_of_date`(월 1일) 종가 기준이다(1일이 휴장이면 직전 거래일 종가).
+  composite_v2 점수는 월말 마지막 거래일 기준이므로 /screen 에서 붙는 valuation 은 점수일보다 최대 한 거래일 뒤 가격이다.
+  따라서 `max_per` 등 valuation 필터에는 최대 한 거래일 정도의 시점 차이가 있다. 백테스트 점수 자체에는 영향이 없다(표시/필터에 한정).
+  (B5 산출물의 per 는 직전 월말 종가 기준이라 DB 값과 일치하지 않는 행이 있다. 상세: api-test1-project `docs/valuation_b5_vs_db_reconciliation.md`)
 
 ## 기본 strategy_version 전환
 - 코드 기본값: `composite_v1`.
