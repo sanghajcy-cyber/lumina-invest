@@ -198,7 +198,7 @@ async def chat(
                 summary = await llm.chat(llm_model, [
                     {'role': 'system', 'content': '검색 근거만 바탕으로 한국어로 간결히 답하세요. 출처 제목을 언급하고 근거가 부족하면 밝히세요. 매매를 단정하지 마세요.'},
                     {'role': 'user', 'content': f'질문: {body.question}\n근거:\n{rag_context}'}],
-                    options={'num_ctx': 2048, 'num_predict': 160, 'temperature': 0.2})
+                    options={'num_ctx': 2048, 'num_predict': 320, 'temperature': 0.2})
                 if isinstance(summary, str) and summary.strip():
                     result['answer'] = summary.strip()
                     result['model'] = llm_model
