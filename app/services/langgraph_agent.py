@@ -106,9 +106,9 @@ def _parse_action(raw: str) -> dict | None:
 
 
 def _extract_question(messages: list[dict]) -> str:
-    """messages 목록에서 최초 user 질문을 추출한다."""
-    for msg in messages:
-        if msg.get("role") == "user":
+    """messages 목록에서 현재 질문(마지막 user 질문, 도구 조회 결과 제외)을 추출한다."""
+    for msg in reversed(messages):
+        if msg.get("role") == "user" and not str(msg.get("content", "")).startswith("[검색 결과]"):
             return msg.get("content", "")
     return ""
 
