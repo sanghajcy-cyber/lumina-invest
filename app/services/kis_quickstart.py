@@ -151,6 +151,11 @@ async def start(db: AsyncSession, user_id: str) -> dict:
     if await _batch_exclusive_running(db):
         raise QuickstartBlocked("batch_exclusive", BATCH_EXCLUSIVE_MESSAGE)
 
+    from app.services.atr_strategy import service as atr_strategy   # 지연 import
+    blocked = await atr_strategy.auto_trade_block_reason(db)
+    if blocked:
+        raise QuickstartBlocked("atr_strategy_active", blocked)
+
     row = await _row(db, uid)
     if row is None:
         row = BrokerSettings(user_id=uid)

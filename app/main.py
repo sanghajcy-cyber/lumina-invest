@@ -147,6 +147,9 @@ app.include_router(tradingview_routes.router)
 # 자유 산식 커스텀 지표 (DSL · 버전 · 결과 저장)
 from app.routes import formula as formula_routes  # noqa: E402
 app.include_router(formula_routes.router)
+# 월초 ATR 리밸런싱 전략 (목표 파일 · ATR · dry-run 계획)
+from app.routes import atr_strategy as atr_strategy_routes  # noqa: E402
+app.include_router(atr_strategy_routes.router)
 
 # 정적 파일 (프론트엔드)
 _public = os.path.join(os.path.dirname(__file__), "..", "public")
