@@ -177,14 +177,8 @@ async def fetch_market(targets: list[dict], today: date, period: int) -> tuple[d
 # ── 계획 수립 ───────────────────────────────────────────────────────────
 
 
-async def build_plan(db: AsyncSession, user_id: uuid.UUID, kind: str = "dry_run", today: date | None = None) -> StrategyRun:
-    """잔고·장부·시세·ATR 로 종목별 계획을 만들고 StrategyRun 으로 남긴다(주문 없음). 커밋은 호출자."""
-    if kind not in ("dry_run", "rebalance"):
-        raise StrategyError(f"알 수 없는 실행 종류: {kind}")
-    today = today or kst_today()
-    plan = await get_plan(db, user_id, create=False)
-    if plan is None:
-        raise StrategyError("전략 플랜이 없습니다. 먼저 설정을 저장하세요.")
+async def compute_plan(db: AsyncSession, plan: StrategyPlan, user_id: uuid.UUID, kind: str, today: date) -> dict:
+    """잔고·장부·시세·ATR 로 종목별 계획을 계산한다(DB 기록 없음). StrategyRun 필드 dict 를 돌려준다."""
     targets = [target_to_dict(t) for t in await list_targets(db, plan)]
     if not targets:
         raise StrategyError("목표 포트폴리오가 비어 있습니다. CSV/엑셀 파일을 먼저 업로드하세요.")
@@ -217,13 +211,21 @@ async def build_plan(db: AsyncSession, user_id: uuid.UUID, kind: str = "dry_run"
     if no_atr:
         warnings.append(f"ATR 없음(% 손절 {plan.stop_loss_pct:g}%로 대체, 매수 범위 제한 없음): {', '.join(no_atr)}")
     summary = {**planner.summarize(rows), "first_trading_day": first_day.isoformat(), "is_rebalance_day": today == first_day}
+    return dict(invest_amount=float(plan.invest_amount), effective_budget=round(budget, 2), cash_balance=round(cash, 2),
+                ledger_eval=round(ledger_eval, 2), warnings=warnings, rows=rows, summary=summary,
+                note=f"{plan.target_file_name} · 목표 {len(targets)}종목"[:300])
 
-    run = StrategyRun(
-        plan_id=plan.id, user_id=user_id, run_date=today, kind=kind, status="planned",
-        invest_amount=float(plan.invest_amount), effective_budget=round(budget, 2), cash_balance=round(cash, 2),
-        ledger_eval=round(ledger_eval, 2), warnings=warnings, rows=rows, summary=summary,
-        note=f"{plan.target_file_name} · 목표 {len(targets)}종목"[:300],
-    )
+
+async def build_plan(db: AsyncSession, user_id: uuid.UUID, kind: str = "dry_run", today: date | None = None) -> StrategyRun:
+    """계획을 계산해 StrategyRun(status=planned)으로 남긴다(주문 없음). 커밋은 호출자."""
+    if kind not in ("dry_run", "rebalance"):
+        raise StrategyError(f"알 수 없는 실행 종류: {kind}")
+    today = today or kst_today()
+    plan = await get_plan(db, user_id, create=False)
+    if plan is None:
+        raise StrategyError("전략 플랜이 없습니다. 먼저 설정을 저장하세요.")
+    fields = await compute_plan(db, plan, user_id, kind, today)
+    run = StrategyRun(plan_id=plan.id, user_id=user_id, run_date=today, kind=kind, status="planned", **fields)
     db.add(run)
     await db.flush()
     return run
@@ -233,6 +235,9 @@ def run_to_dict(run: StrategyRun) -> dict:
     return {"id": str(run.id), "run_date": run.run_date.isoformat(), "kind": run.kind, "status": run.status,
             "invest_amount": run.invest_amount, "effective_budget": run.effective_budget, "cash_balance": run.cash_balance,
             "ledger_eval": run.ledger_eval, "warnings": run.warnings, "rows": run.rows, "summary": run.summary, "note": run.note,
+            "trigger": getattr(run, "trigger", None), "attempt": getattr(run, "attempt", 0),
+            "started_at": run.started_at.isoformat() if getattr(run, "started_at", None) else None,
+            "finished_at": run.finished_at.isoformat() if getattr(run, "finished_at", None) else None,
             "created_at": run.created_at.isoformat() if run.created_at else None}
 
 

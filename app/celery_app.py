@@ -5,6 +5,7 @@
 Beat  실행: celery -A app.celery_app beat  --loglevel=info
 """
 from celery import Celery
+from celery.schedules import crontab
 from app.config import settings
 
 # 주문을 내거나 계좌 상태를 바꾸는 태스크는 trading 큐로 보내 전용 워커(celery-worker-trading)가 처리한다.
@@ -23,7 +24,7 @@ celery_app = Celery(
     # autodiscover_tasks(["app.tasks"])는 app.tasks.tasks 모듈을 찾기 때문에 실제로는 아무 태스크도
     # 등록되지 않았다(워커 [tasks] 목록이 비어 Beat 스케줄·/async 엔드포인트가 모두 대기 상태).
     # 태스크 모듈을 명시적으로 include 한다.
-    include=["app.tasks.sync_tasks", "app.tasks.ingest_tasks", "app.tasks.agent_tasks"],
+    include=["app.tasks.sync_tasks", "app.tasks.ingest_tasks", "app.tasks.agent_tasks", "app.tasks.strategy_tasks"],
 )
 
 celery_app.conf.update(
@@ -86,6 +87,18 @@ celery_app.conf.update(
             "task": "quant.confirm_fills",
             "schedule": 120.0,            # 2분 — 게이트웨이 경유 KIS 실주문의 체결 확인 (live_orders)
             "options": {"expires": 110},
+        },
+        # 월초 ATR 리밸런싱 전략: 장중 매분(회차 5분, 종목은 tick 여러 번에 나눠 처리) + 15:00 일괄 취소 + 15:20 결과 확정.
+        # crontab 은 timezone(Asia/Seoul) 기준. 휴장일은 태스크 안에서 거른다.
+        "strategy-rebalance-tick": {
+            "task": "strategy.rebalance_tick",
+            "schedule": crontab(minute="*", hour="9-14", day_of_week="mon-fri"),
+            "options": {"expires": 50},
+        },
+        "strategy-rebalance-close": {
+            "task": "strategy.rebalance_tick",
+            "schedule": crontab(minute="0,1,2,20,21,22", hour="15", day_of_week="mon-fri"),
+            "options": {"expires": 50},
         },
         "rebalance-check-hourly": {
             "task": "rebalance.check_triggers",

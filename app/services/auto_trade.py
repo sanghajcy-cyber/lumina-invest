@@ -407,11 +407,13 @@ async def _place_live_order_via_gateway(
     order_type: str | None = None,
     order_tag: str = "",
     order_seq: int | None = None,
+    client_order_id: str | None = None,
 ) -> dict:
     """stock-coin-trade 게이트웨이로 KIS 주문을 내고 live_orders 에 추적 행을 남긴다.
 
     source 는 live_orders.source(주문 주체). order_type 을 주지 않으면 _live_order_type()(공격 모드/기본값).
     order_tag·order_seq 는 clientOrderId 에 붙어, 같은 분에 같은 종목·방향 주문을 여러 번 내는 호출자를 구분한다.
+    client_order_id 를 주면 그 값을 그대로 쓴다 — 주문 전에 회차 기록을 먼저 남기는 호출자(ATR 전략)가 같은 키를 미리 정한다.
 
     실패해도 예외를 올리지 않는다(사이클 지속). 가상계좌 체결은 이미 끝났으므로 쿨다운 슬롯은 반납하지 않는다 —
     반납하면 다음 사이클에 가상 포지션이 중복으로 쌓인다. 실패는 알림 + live_orders.status=ERROR 로 남긴다.
@@ -426,7 +428,7 @@ async def _place_live_order_via_gateway(
         logger.warning("Redis 미연결(위험관리 메모리 폴백) — 실전 주문 생략 (%s %s x%d)", side, symbol, quantity)
         return {"status": "skipped", "broker": "kis", "via": "stock-coin-trade", "environment": env, "reason": "risk_store_unavailable"}
     try:
-        client_order_id = gateway.make_client_order_id(str(uid), symbol, side, tag=order_tag, seq=order_seq)
+        client_order_id = client_order_id or gateway.make_client_order_id(str(uid), symbol, side, tag=order_tag, seq=order_seq)
     except gateway.GatewayError as e:
         return {"status": "error", "broker": "kis", "via": "stock-coin-trade", "error": str(e)}
 
