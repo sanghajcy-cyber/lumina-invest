@@ -121,11 +121,23 @@ def _sync_env(row: BrokerSettings) -> list[str]:
     return changed
 
 
-async def ensure_system_batch(db: AsyncSession) -> dict:
-    """배치 스위치(env)와 실주문 경로를 보고 시스템 행을 켜거나 끈다. 매 사이클 호출해도 안전(멱등)."""
+async def ensure_system_batch(db: AsyncSession, blocked_reason: str | None = None) -> dict:
+    """배치 스위치(env)와 실주문 경로를 보고 시스템 행을 켜거나 끈다. 매 사이클 호출해도 안전(멱등).
+
+    blocked_reason 이 있으면(같은 KIS 계좌에서 ATR 전략이 실주문 모드로 실행 중) 배치를 켜지 않고 꺼 둔다.
+    """
     from app.services import kis_quickstart as qs  # 지연 import: kis_quickstart → auto_trade → (지연) kis_batch
 
     row = await _row(db)
+
+    if blocked_reason:
+        action = "none"
+        if row is not None and row.quant_auto_enabled and _is_batch_row(row):
+            row.quant_auto_enabled = False
+            await db.commit()
+            action = "disabled"
+            await audit(BATCH_USER, "", "quant.kis_batch.stop", {"reason": "atr_strategy_active", "detail": blocked_reason})
+        return {"enabled": is_configured(), "running": False, "reason": "atr_strategy_active", "detail": blocked_reason, "action": action}
 
     if not is_configured():
         if row is not None and row.quant_auto_enabled and _is_batch_row(row):

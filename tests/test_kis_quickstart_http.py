@@ -41,6 +41,14 @@ def kis_row():
     )
 
 
+@pytest.fixture(autouse=True)
+def no_atr_strategy_block():
+    """가짜 DB 가 모든 select 에 같은 행을 돌려주므로, ATR 전략 차단 점검은 '실행 중인 전략 없음' 으로 고정한다."""
+    from app.services.atr_strategy import service as atr_strategy
+    with patch.object(atr_strategy, "auto_trade_block_reason", AsyncMock(return_value=None)):
+        yield
+
+
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setattr(settings, "STOCK_COIN_TRADE_BASE_URL", "https://sct.test")

@@ -1107,12 +1107,25 @@ async def _run_once(user_id: str) -> None:
         _is_running = False
 
 
+class AutoTradeBlocked(Exception):
+    """같은 KIS 계좌를 쓰는 다른 전략이 실행 중이라 이 사용자의 실주문 자동매매를 켤 수 없음."""
+
+
 async def start_auto_trade(db: AsyncSession, user_id: str) -> bool:
-    """자동매매 활성화: DB 플래그 ON + 즉시 1회 사이클(백그라운드). 이후 주기 실행은 Celery Beat."""
+    """자동매매 활성화: DB 플래그 ON + 즉시 1회 사이클(백그라운드). 이후 주기 실행은 Celery Beat.
+
+    broker=kis ∧ quant_mode=live 인데 ATR 전략이 실주문 모드로 켜져 있으면 AutoTradeBlocked.
+    """
     global _auto_trade_task, _auto_trade_user_id
     uid = _resolve_user_id(user_id)
     if await is_enabled(db, uid):
         return False
+    from app.services.atr_strategy import service as atr_strategy   # 지연 import
+    reason = await atr_strategy.auto_trade_block_reason(db)
+    if reason:
+        row = (await db.execute(select(BrokerSettings).where(BrokerSettings.user_id == uid))).scalar_one_or_none()
+        if atr_strategy.is_live_kis_row(row):
+            raise AutoTradeBlocked(reason)
     await set_enabled(db, uid, True)
     _auto_trade_user_id = user_id or "quant_system"
     if not (_auto_trade_task and not _auto_trade_task.done()):
@@ -1150,10 +1163,23 @@ async def run_cycle_for_enabled_users() -> dict:
     """
     from app.services import kis_batch  # 지연 import (kis_batch → kis_quickstart → auto_trade 순환 방지)
 
+    from app.services.atr_strategy import service as atr_strategy   # 지연 import
+
     session_factory = get_session_factory()
     async with session_factory() as db:
+        blocked = None
         try:
-            batch = await kis_batch.ensure_system_batch(db)
+            blocked = await atr_strategy.auto_trade_block_reason(db)
+            if blocked:
+                await atr_strategy.force_off_live_kis_auto_trade(db, blocked)
+        except Exception as exc:   # 점검 실패가 사이클 전체를 막으면 안 된다 — 단, 실패를 기록한다
+            logger.exception("ATR 전략 차단 점검 실패: %s", exc)
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+        try:
+            batch = await kis_batch.ensure_system_batch(db, blocked_reason=blocked)
         except Exception as exc:  # 배치 점검 실패가 사용자 계정 사이클을 막으면 안 된다
             logger.exception("KIS 모의투자 배치 점검 실패: %s", exc)
             batch = {"enabled": kis_batch.is_configured(), "running": False, "error": str(exc)}
@@ -1170,4 +1196,4 @@ async def run_cycle_for_enabled_users() -> dict:
         except Exception:
             failed += 1
             logger.exception("자동매매 사이클 실패 user=%s", uid)
-    return {"enabled_users": len(uids), "ran": ran, "failed": failed, "kis_batch": batch}
+    return {"enabled_users": len(uids), "ran": ran, "failed": failed, "kis_batch": batch, "blocked_by_strategy": blocked}
