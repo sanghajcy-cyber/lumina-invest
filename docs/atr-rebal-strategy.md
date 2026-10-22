@@ -11,7 +11,7 @@
 | 1 | st 게이트웨이 확인 (취소 필드·주문 유형·잔고·호출 제한) | 완료 |
 | 2 | 기반: Wilder ATR, 거래일 달력, clientOrderId 태그, `live_orders.source`, trading 큐 | 완료 (`feat/atr-rebal-step2-foundation`) |
 | 3 | 테이블·목표 로더·ATR 계산·계획 수립(dry-run)·auto_trade 차단 | 완료 (`feat/atr-rebal-step3-plan-dryrun`) |
-| 4 | 시분할 주문 실행(5분 회차)·15:00 일괄 취소 | 예정 |
+| 4 | 시분할 주문 실행(5분 회차)·15:00 일괄 취소·수동 시작/재실행/중지·이어받기 | 코드 완료, **실주문 미승인** (`feat/atr-rebal-step4-slicing`) |
 | 5 | 손절 감시·장부 동기화 | 예정 |
 | 6 | reconciliation 반영·화면·장 마감 결과 | 예정 |
 | 7 | `/api/quant/financials/screen` 상위 N개 연동 | 예정 |
@@ -36,12 +36,35 @@
 - **위험관리**: risk_guard 의 일손실 한도·일 주문 수·쿨다운은 이 전략의 **매수에만** 적용, 손절 매도는 막지 않는다(kill switch 만 예외).
   손절 주문이 열려 있거나 체결 확인 대기 중이면 새 손절을 내지 않는다. 전략 전용 일 주문 수 한도 `strategy_plans.max_orders_per_day`.
 
-## API (3단계)
+## API
 
 `/api/strategy/atr` — `GET|PUT /plan`, `POST /targets`(multipart `file`), `GET /targets`, `POST /dry-run`,
-`GET /runs`, `GET /runs/{id}`, `GET /runs/{id}/plan.csv`, `POST /activate`(`{"dry_run": true}`), `POST /deactivate`.
+`GET /runs`, `GET /runs/{id}`, `GET /runs/{id}/plan.csv`, `POST /activate`(`{"dry_run": true}`), `POST /deactivate`,
+`POST /rebalance/start`(`{"force": false}`), `GET /rebalance/today`, `POST /rebalance/stop`.
 `plan.csv` 의 앞 10개 컬럼은 참고 구현 `state/plan_YYYYMMDD.csv` 와 같다. 단 `보유수량`은 계좌가 아니라 **전략 장부** 수량,
 `주문가능수량`은 min(장부, 계좌 보유) — 게이트웨이 잔고에 KIS 주문가능수량이 없어서다.
+
+## 4단계 실행 방식
+
+- **승인 게이트**: `service.LIVE_EXECUTION_AVAILABLE = False` 인 동안 Beat tick·수동 시작·`dry_run=false` 활성화가 모두 거부된다.
+  실제 계좌 dry-run 확인 후 이 값을 바꾸는 커밋이 승인 절차다.
+- **Beat**: `strategy.rebalance_tick` 평일 09:00~14:59 매분 + 15:00~15:02·15:20~15:22 (trading 큐). 휴장일은 태스크 안에서 거른다.
+  환경별 Redis 잠금(`strategy:acct-lock:kis:<env>`, 55초)으로 tick 이 겹치지 않는다.
+- **회차**: 현재 5분 회차에서 아직 처리 안 한 종목을 매도 먼저 tick 당 최대 6종목 → 많으면 같은 회차 안의 다음 tick 으로 넘어간다.
+  매도 마지막 회차(14:30)는 1분 창. 종목 처리 = 같은 종목 열린 주문 취소·재조회 → 장부에 체결 반영 → 남은 수량 재계산 →
+  (매수) 일손실 한도·시가 ± ATR 범위·쿨다운 → 회차 수량 = ceil(남은 ÷ min(남은 회차, 남은 수량)), 1건 상한으로 자름 →
+  LIMIT 매수 현재가+1틱 / 매도 현재가−1틱. 회차 기록을 **주문 전에** 커밋(재시작 시 같은 회차 중복 주문 방지).
+- **이어받기**: 그날 `strategy_runs(kind=rebalance)` 가 있으면 새로 만들지 않고 남은 회차만 진행한다. 놓친 회차는 건너뛰고
+  남은 수량을 남은 회차로 다시 나눈다. 주문 직전에 죽어 `planned` 로 남은 회차는 live_orders 와 연결하거나 실패로 닫는다.
+- **수동 시작** `POST /rebalance/start` (참고 구현 `--rebalance`): 첫 거래일이 아니어도 오늘 시작. 이후 회차는 Beat 가 진행.
+- **재실행** `POST /rebalance/start {"force": true}` (참고 구현 `--force`): 열린 주문 취소 → 장부 기준으로 계획을 다시 세우고
+  attempt+1(새 clientOrderId 태그 `ATR<attempt>`). 이미 체결된 수량은 장부에 있으므로 빠진다.
+- **중지** `POST /rebalance/stop`: 열린 주문 취소 → `skipped`. **진행 상황** `GET /rebalance/today`.
+- **15:00** 열린 리밸런싱 주문 일괄 취소, **15:20** 장부 기준 목표 대비 결과(`summary.result`) 확정 → `done`.
+- **위험관리 매핑(확인 필요)**: risk_guard 의 일손실 한도는 사용자 설정 그대로 매수에만 적용. 일 주문 수는 risk_guard 기본(20건)이
+  아니라 전략 전용 `max_orders_per_day`(기본 1000)로 센다. 쿨다운은 risk_guard 값을 쓰되 `min(설정, 회차 간격 − 1분 = 4분)` 으로
+  자른다 — 그대로(30분) 쓰면 5분 회차가 30분에 한 번으로 줄어든다.
+- 비상 정지(kill switch)면 tick 이 아무것도 하지 않는다. 손절로 `rows[].halted` 가 켜진 종목은 남은 회차를 건너뛴다(5단계에서 설정).
 
 ## 별도 작업 목록 (이번 범위 밖)
 

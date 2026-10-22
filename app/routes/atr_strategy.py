@@ -1,7 +1,8 @@
 """월초 ATR 리밸런싱 전략 API — /api/strategy/atr
 
-플랜 설정 · 목표 파일(CSV/xlsx) 업로드 · dry-run 계획(plan_*.csv 형식 내려받기) · 활성화/해제.
-주문 실행은 아직 없다(dry-run 전용).
+플랜 설정 · 목표 파일(CSV/xlsx) 업로드 · dry-run 계획(plan_*.csv 형식 내려받기) · 활성화/해제 ·
+리밸런싱 수동 시작(--rebalance)·재실행(--force)·중지·오늘 진행 상황.
+실제 모의주문은 service.LIVE_EXECUTION_AVAILABLE 승인 전까지 막혀 있다.
 """
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.postgres import get_pg_session
 from app.lib.jwt_auth import get_current_user_any
-from app.services.atr_strategy import planner
+from app.services.atr_strategy import executor, planner
 from app.services.atr_strategy import service as svc
 
 router = APIRouter(prefix="/api/strategy/atr", tags=["atr-strategy"])
@@ -43,6 +44,16 @@ class PlanBody(BaseModel):
 
 class ActivateBody(BaseModel):
     dry_run: bool = True
+
+
+class RebalanceStartBody(BaseModel):
+    force: bool = Field(False, description="오늘 실행이 있어도 열린 주문을 취소하고 현재 장부 기준으로 처음부터 다시(참고 구현 --force)")
+
+
+def _slice_dict(sl) -> dict:
+    return {"symbol": sl.symbol, "side": sl.side, "seq": sl.seq, "attempt": sl.attempt, "quantity": sl.quantity,
+            "price": sl.price, "status": sl.status, "reason": sl.reason, "filled_qty": sl.filled_qty,
+            "client_order_id": sl.client_order_id, "created_at": sl.created_at.isoformat() if sl.created_at else None}
 
 
 async def _plan_payload(db: AsyncSession, uid: uuid.UUID) -> dict:
@@ -156,3 +167,40 @@ async def deactivate(user=Depends(get_current_user_any), db: AsyncSession = Depe
         return await svc.set_active(db, _uid(user), False)
     except svc.StrategyError as exc:
         raise HTTPException(409, str(exc))
+
+
+@router.post("/rebalance/start")
+async def rebalance_start(body: RebalanceStartBody = RebalanceStartBody(), user=Depends(get_current_user_any),
+                          db: AsyncSession = Depends(get_pg_session)):
+    """첫 거래일이 아니어도 오늘 리밸런싱을 시작한다(처음 매수·월중 포트폴리오 변경). 이후 회차는 Beat tick 이 진행.
+
+    오늘 실행이 이미 있으면 그대로 이어받는다. force=true 면 열린 주문을 취소하고 장부 기준으로 다시 계획한다.
+    """
+    try:
+        run = await executor.start_rebalance(db, _uid(user), manual=True, force=body.force)
+    except svc.StrategyError as exc:
+        await db.rollback()
+        raise HTTPException(409, str(exc))
+    return svc.run_to_dict(run)
+
+
+@router.get("/rebalance/today")
+async def rebalance_today(user=Depends(get_current_user_any), db: AsyncSession = Depends(get_pg_session)):
+    repo = executor.Repo(db)
+    plan = await repo.plan_for(_uid(user))
+    run = await repo.today_run(plan, executor.now_kst().date()) if plan else None
+    if run is None:
+        return {"run": None, "slices": []}
+    slices = sorted(await repo.slices(run), key=lambda s: (s.attempt, s.seq, s.side, s.symbol))
+    return {"run": svc.run_to_dict(run), "slices": [_slice_dict(s) for s in slices]}
+
+
+@router.post("/rebalance/stop")
+async def rebalance_stop(user=Depends(get_current_user_any), db: AsyncSession = Depends(get_pg_session)):
+    """오늘 리밸런싱을 멈춘다(열린 주문 취소 → skipped). 다시 하려면 /rebalance/start force=true."""
+    try:
+        run = await executor.stop_rebalance(db, _uid(user))
+    except svc.StrategyError as exc:
+        await db.rollback()
+        raise HTTPException(409, str(exc))
+    return svc.run_to_dict(run)

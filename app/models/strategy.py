@@ -102,11 +102,20 @@ class StrategyRun(Base, UUIDPkMixin, CreatedAtMixin, UpdatedAtMixin):
     rows: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)              # 종목별 계획 행(plan_*.csv 와 대응)
     summary: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     note: Mapped[str] = mapped_column(String(300), nullable=False, default="")
+    # 리밸런싱 실행 상태(4단계). attempt 는 수동 재실행(force)마다 1 증가 → 새 clientOrderId·회차 기록.
+    trigger: Mapped[str] = mapped_column(String(10), nullable=False, default="auto")   # auto(첫 거래일) | manual
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class StrategySlice(Base, UUIDPkMixin, CreatedAtMixin, UpdatedAtMixin):
     __tablename__ = "strategy_slices"
-    __table_args__ = (Index("ix_strategy_slices_run_symbol", "run_id", "symbol"),)
+    __table_args__ = (
+        Index("ix_strategy_slices_run_symbol", "run_id", "symbol"),
+        # 회차 1개 = (실행, 시도, 종목, 방향, 회차번호) 1행 — 재시작해도 같은 회차를 두 번 처리하지 않는다
+        UniqueConstraint("run_id", "attempt", "symbol", "side", "seq", name="uq_strategy_slices_round"),
+    )
 
     run_id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("strategy_runs.id", ondelete="CASCADE"), nullable=False)
     plan_id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("strategy_plans.id", ondelete="CASCADE"), nullable=False)
@@ -120,3 +129,6 @@ class StrategySlice(Base, UUIDPkMixin, CreatedAtMixin, UpdatedAtMixin):
     live_order_id: Mapped[uuid.UUID | None] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("live_orders.id"), nullable=True)
     status: Mapped[str] = mapped_column(String(10), nullable=False, default="planned")
     reason: Mapped[str] = mapped_column(String(300), nullable=False, default="")
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    filled_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)        # 장부에 이미 반영한 체결 수량
+    avg_fill_price: Mapped[float] = mapped_column(Float, nullable=False, default=0)
