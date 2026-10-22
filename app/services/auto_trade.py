@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.stock import get_quant_indicators, QUANT_STOCKS
 from app.database.postgres import get_session_factory
 from app.models import BrokerSettings, Order, Portfolio, QuantVirtualAccount, PORTFOLIO_BOOK_QUANT, LiveOrder, LIVE_ORDER_OPEN_STATUSES
+from app.models import LIVE_ORDER_SOURCE_MANUAL, LIVE_ORDER_SOURCE_QUANT_AUTO
 from app.models.base import SYSTEM_USER_ID
 from app.services import notification
 from app.services import strategy_loader
@@ -401,8 +402,16 @@ async def _place_live_order_via_gateway(
     quantity: int,
     price: float,
     user_id: str,
+    *,
+    source: str = LIVE_ORDER_SOURCE_QUANT_AUTO,
+    order_type: str | None = None,
+    order_tag: str = "",
+    order_seq: int | None = None,
 ) -> dict:
     """stock-coin-trade 게이트웨이로 KIS 주문을 내고 live_orders 에 추적 행을 남긴다.
+
+    source 는 live_orders.source(주문 주체). order_type 을 주지 않으면 _live_order_type()(공격 모드/기본값).
+    order_tag·order_seq 는 clientOrderId 에 붙어, 같은 분에 같은 종목·방향 주문을 여러 번 내는 호출자를 구분한다.
 
     실패해도 예외를 올리지 않는다(사이클 지속). 가상계좌 체결은 이미 끝났으므로 쿨다운 슬롯은 반납하지 않는다 —
     반납하면 다음 사이클에 가상 포지션이 중복으로 쌓인다. 실패는 알림 + live_orders.status=ERROR 로 남긴다.
@@ -417,22 +426,23 @@ async def _place_live_order_via_gateway(
         logger.warning("Redis 미연결(위험관리 메모리 폴백) — 실전 주문 생략 (%s %s x%d)", side, symbol, quantity)
         return {"status": "skipped", "broker": "kis", "via": "stock-coin-trade", "environment": env, "reason": "risk_store_unavailable"}
     try:
-        client_order_id = gateway.make_client_order_id(str(uid), symbol, side)
+        client_order_id = gateway.make_client_order_id(str(uid), symbol, side, tag=order_tag, seq=order_seq)
     except gateway.GatewayError as e:
         return {"status": "error", "broker": "kis", "via": "stock-coin-trade", "error": str(e)}
 
+    ot = (order_type or _live_order_type()).upper()
     row: LiveOrder | None = None
     if db is not None:
         row = LiveOrder(
             user_id=uid, client_order_id=client_order_id, environment=env, broker="kis",
-            symbol=symbol, name=name, side=side.upper(), order_type=_live_order_type(),
-            quantity=quantity, price=float(price), status="PENDING",
+            symbol=symbol, name=name, side=side.upper(), order_type=ot,
+            quantity=quantity, price=float(price), status="PENDING", source=source,
         )
         db.add(row)
         await db.commit()
 
     try:
-        result = await gateway.place_order(symbol, side, quantity, price, client_order_id=client_order_id, order_type=_live_order_type())
+        result = await gateway.place_order(symbol, side, quantity, price, client_order_id=client_order_id, order_type=ot)
     except gateway.GatewayError as e:
         logger.warning("게이트웨이 실주문 실패 (%s %s x%d): [%s] %s", side, symbol, quantity, e.code, e)
         if row is not None:
@@ -512,7 +522,8 @@ async def place_manual_kis_order(db: AsyncSession, user_id: str, symbol: str, na
     price = float(price)
 
     if gateway.is_configured():
-        result = await _place_live_order_via_gateway(db, broker_row, symbol, name or symbol, side, quantity, price, str(uid))
+        result = await _place_live_order_via_gateway(db, broker_row, symbol, name or symbol, side, quantity, price, str(uid),
+                                                     source=LIVE_ORDER_SOURCE_MANUAL)
     else:
         creds = await kis_credentials.get_credentials()
         if creds is None:

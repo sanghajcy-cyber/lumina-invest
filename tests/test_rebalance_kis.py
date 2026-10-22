@@ -89,8 +89,8 @@ def test_execute_kis_routes_orders_through_gateway(env):
     results = iter([{"status": "submitted", "order_no": "0000040001", "client_order_id": "c1", "environment": "paper"},
                     {"status": "skipped", "reason": "market_closed", "environment": "paper"}])
     calls = []
-    async def place(db, broker_row, symbol, name, side, qty, price, user_id):
-        calls.append((broker_row, symbol, side, qty, price, user_id)); return next(results)
+    async def place(db, broker_row, symbol, name, side, qty, price, user_id, **kw):
+        calls.append((broker_row, symbol, side, qty, price, user_id, kw)); return next(results)
     from app.services import auto_trade
     db = FakeDb()
     asyncio.run(rb.set_account_source(UID, "kis"))
@@ -99,6 +99,7 @@ def test_execute_kis_routes_orders_through_gateway(env):
     assert isinstance(run, RebalanceRun) and run.status == "executed" and run.note.startswith("[kis] ")
     assert [c[1:4] for c in calls] == [("999999.KS", "sell", 3), ("240810.KQ", "buy", 3)]
     assert calls[0][0] is None and calls[0][5] == str(UID)
+    assert all(c[6] == {"source": "REBALANCE"} for c in calls)
     st = {o["symbol"]: o["status"] for o in run.orders}
     assert st == {"999999.KS": "submitted", "240810.KQ": "skipped"}
     assert run.orders[0]["live_order"]["order_no"] == "0000040001" and run.orders[1]["error"] == "market_closed"

@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from typing import Any
 
 import httpx
@@ -77,15 +77,45 @@ KRX_HOLIDAYS_2026: frozenset[str] = frozenset({
 })
 
 
+KRX_HOLIDAY_DATA_YEARS: frozenset[int] = frozenset({2026})   # 휴장일 목록을 코드에 갖고 있는 연도
+
+
+def _extra_holidays() -> set[str]:
+    return {d.strip() for d in (getattr(settings, "KRX_EXTRA_HOLIDAYS", "") or "").split(",") if d.strip()}
+
+
 def krx_holidays() -> set[str]:
-    extra = {d.strip() for d in (getattr(settings, "KRX_EXTRA_HOLIDAYS", "") or "").split(",") if d.strip()}
-    return set(KRX_HOLIDAYS_2026) | extra
+    return set(KRX_HOLIDAYS_2026) | _extra_holidays()
+
+
+def krx_holidays_known(year: int) -> bool:
+    """그 해 휴장일 목록이 있는지 (코드 내장 연도 또는 KRX_EXTRA_HOLIDAYS 에 그 해 날짜가 하나라도 있음).
+
+    없으면 신정 같은 휴장일을 거래일로 오판하므로, 날짜 기준으로 주문을 계획하는 호출자는 먼저 확인해야 한다.
+    """
+    return year in KRX_HOLIDAY_DATA_YEARS or any(d.startswith(f"{year}-") for d in _extra_holidays())
+
+
+def is_krx_trading_day(day: date) -> bool:
+    """KRX 거래일(주말·휴장일 제외) 여부. 휴장일 목록이 없는 해는 주말만 거른다 — krx_holidays_known 으로 먼저 확인할 것."""
+    return day.weekday() < 5 and day.strftime("%Y-%m-%d") not in krx_holidays()
+
+
+def first_trading_day_of_month(year: int, month: int) -> date:
+    day = date(year, month, 1)
+    while not is_krx_trading_day(day):
+        day += timedelta(days=1)
+    return day
+
+
+def is_first_trading_day_of_month(day: date) -> bool:
+    return day == first_trading_day_of_month(day.year, day.month)
 
 
 def is_krx_market_open(now: datetime | None = None) -> bool:
     """KRX 정규장 시간(평일 09:00~15:30 KST, 휴장일 제외) 여부."""
     kst = (now or datetime.now(KST)).astimezone(KST)
-    if kst.weekday() >= 5 or kst.strftime("%Y-%m-%d") in krx_holidays():
+    if not is_krx_trading_day(kst.date()):
         return False
     minutes = kst.hour * 60 + kst.minute
     return KRX_OPEN[0] * 60 + KRX_OPEN[1] <= minutes < KRX_CLOSE[0] * 60 + KRX_CLOSE[1]
@@ -140,11 +170,32 @@ def align_price_to_tick(price: float, side: str) -> int:
     return down
 
 
-def make_client_order_id(user_id: str, symbol: str, side: str, now: datetime | None = None) -> str:
-    """멱등키. 사이클(기본 3분) 1회 + 쿨다운 전제에서 (사용자, 종목, 방향, 분) 이 유일하다. 최대 64자."""
+_ORDER_TAG_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+
+
+def make_client_order_id(user_id: str, symbol: str, side: str, now: datetime | None = None,
+                         tag: str = "", seq: int | None = None) -> str:
+    """멱등키. 최대 64자.
+
+    기본(tag 없음)은 (사용자, 종목, 방향, 분) — 사이클(기본 3분) 1회 + 쿨다운 전제의 자동매매용이다.
+    같은 분에 같은 종목·방향으로 여러 주문을 낼 수 있는 호출자(시분할 회차·손절)는 tag(대문자·숫자·_-, 16자 이내)와
+    seq(회차·시도 번호)를 붙여 서로 다른 주문이 같은 키로 묶여 duplicate 처리되지 않게 한다.
+    """
     stamp = (now or datetime.now(KST)).astimezone(KST).strftime("%Y%m%d%H%M")
     uid = str(user_id).replace("-", "")[:12]
-    return f"{uid}:{normalize_symbol(symbol)}:{normalize_side(side)[0]}:{stamp}"[:64]
+    base = f"{uid}:{normalize_symbol(symbol)}:{normalize_side(side)[0]}:{stamp}"
+    tag = str(tag or "").strip().upper()
+    if tag:
+        if len(tag) > 16 or not set(tag) <= _ORDER_TAG_CHARS:
+            raise GatewayError(f"주문 태그 형식이 올바르지 않습니다: {tag!r}", "INVALID_REQUEST", 400)
+        base += f":{tag}"
+    if seq is not None:
+        if int(seq) < 0:
+            raise GatewayError("주문 순번은 0 이상이어야 합니다.", "INVALID_REQUEST", 400)
+        base += f":{int(seq)}"
+    if len(base) > 64:
+        raise GatewayError("clientOrderId가 64자를 넘습니다.", "INVALID_REQUEST", 400)
+    return base
 
 
 def _client(timeout: float | None = None) -> httpx.AsyncClient:
