@@ -284,3 +284,105 @@ def test_restart_resolves_planned_stop_event(env):
     watch(e, at(10, 0))
     assert a.status == "failed" and "중단" in a.reason
     assert e.repo.stops[-1].seq == 1 and e.repo.stops[-1].status == "submitted"       # 같은 날 새 시도
+
+
+# ── 409 ORDER_IN_PROGRESS · 429 · MARKET ─────────────────────────────────
+
+
+def _busy_then(e, codes):
+    """첫 len(codes) 번의 주문을 주어진 게이트웨이 오류 코드로 실패시키고, 그 뒤는 정상 접수."""
+    real = e.fb.place
+    calls = []
+
+    async def place(db, broker_row, symbol, name, side, qty, price, user_id, **kw):
+        calls.append(kw["client_order_id"])
+        if len(calls) <= len(codes):
+            lo = LiveOrder(user_id=UID, client_order_id=kw["client_order_id"], environment="paper", symbol=symbol, name=name,
+                           side=side.upper(), order_type=kw["order_type"], quantity=qty, price=price, order_no="", status="ERROR",
+                           filled_quantity=0, avg_filled_price=0.0, message="", raw="", source=kw["source"])
+            e.repo.add(lo)
+            return {"status": "error", "code": codes[len(calls) - 1], "error": "busy"}
+        return await real(db, broker_row, symbol, name, side, qty, price, user_id, **kw)
+
+    return place, calls
+
+
+def test_order_in_progress_is_retried_with_new_client_id_and_not_counted(env, monkeypatch):
+    e = env([], {}, balance=bal(s005930=(5, 10_000)))
+    pos(e, "005930", 5, 100_000)
+    place, calls = _busy_then(e, ["ORDER_IN_PROGRESS", "ORDER_IN_PROGRESS"])
+    sleeps = []
+    monkeypatch.setattr(sl.asyncio, "sleep", AsyncMock(side_effect=lambda s: sleeps.append(s)))
+    from app.services import auto_trade
+    with patch.object(auto_trade, "_place_live_order_via_gateway", place):
+        watch(e)
+    ev = e.repo.stops[0]
+    assert ev.status == "submitted" and len(calls) == 3 and len(set(calls)) == 3          # 시도마다 새 clientOrderId(승인부터 다시)
+    assert [c.rsplit(":", 1)[1] for c in calls] == ["0", "1", "2"] and all(":SL:" in c for c in calls)
+    assert sleeps == [sl.ORDER_IN_PROGRESS_RETRY_SEC] * 2 and ev.client_order_id == calls[-1]
+
+
+def test_order_in_progress_exhausted_goes_waiting_not_failed(env, monkeypatch):
+    e = env([], {}, balance=bal(s005930=(5, 10_000)))
+    pos(e, "005930", 5, 100_000)
+    place, calls = _busy_then(e, ["ORDER_IN_PROGRESS"] * 100)                              # 계속 처리 중
+    monkeypatch.setattr(sl.asyncio, "sleep", AsyncMock())
+    from app.services import auto_trade
+    with patch.object(auto_trade, "_place_live_order_via_gateway", place), \
+         patch("app.services.notification.notify_order_error", AsyncMock()) as notify:
+        for i in range(4):                                                                 # 4번의 감시 모두 409
+            watch(e, at(10, i))
+    assert len(e.repo.stops) == 1 and e.repo.stops[0].status == "waiting" and "409" in e.repo.stops[0].reason
+    assert len(calls) == 4 * (sl.ORDER_IN_PROGRESS_RETRIES + 1)                            # 실패로 세지 않아 매번 다시 시도
+    notify.assert_not_awaited()                                                            # 3회 실패 알림 없음
+
+
+def test_rate_limited_goes_waiting_without_retry_burst(env, monkeypatch):
+    e = env([], {}, balance=bal(s005930=(5, 10_000)))
+    pos(e, "005930", 5, 100_000)
+    place, calls = _busy_then(e, ["RATE_LIMITED"])
+    sleep = AsyncMock()
+    monkeypatch.setattr(sl.asyncio, "sleep", sleep)
+    from app.services import auto_trade
+    with patch.object(auto_trade, "_place_live_order_via_gateway", place):
+        watch(e)
+        ev = e.repo.stops[0]
+        assert ev.status == "waiting" and "429" in ev.reason and len(calls) == 1 and sleep.await_count == 0
+        watch(e, at(10, 1))
+    assert ev.status == "submitted" and len(calls) == 2
+
+
+def test_stop_order_goes_out_as_market_with_zero_price_through_real_gateway_path(monkeypatch):
+    """가짜 주문 경로 없이 auto_trade → stock_coin_trade_gateway → HTTP 본문까지 확인."""
+    import json
+    import httpx
+    from app.config import settings
+    from app.services import auto_trade
+    from app.services.brokers import stock_coin_trade_gateway as gw
+    monkeypatch.setattr(settings, "STOCK_COIN_TRADE_BASE_URL", "https://sct.test")
+    monkeypatch.setattr(settings, "STOCK_COIN_TRADE_API_KEY", "key")
+    monkeypatch.setattr(settings, "STOCK_COIN_TRADE_KIS_ENVIRONMENT", "paper")
+    bodies = []
+
+    def handler(request):
+        bodies.append((request.url.path, json.loads(request.content)))
+        if request.url.path.endswith("/order-approval"):
+            return httpx.Response(200, json={"ok": True, "approvalToken": "t"})
+        return httpx.Response(200, json={"ok": True, "order": {"orderNo": "1", "status": "ACCEPTED"}, "duplicate": False})
+
+    gw.set_transport(httpx.MockTransport(handler))
+    added = []
+    db = SimpleNamespace(add=added.append, commit=AsyncMock())
+    try:
+        with patch.object(gw, "is_krx_market_open", return_value=True), \
+             patch.object(auto_trade.notification, "notify_order_placed", AsyncMock()):
+            res = asyncio.run(auto_trade._place_live_order_via_gateway(
+                db, None, "005930", "삼성전자", "sell", 7, 71_234.0, str(UID),
+                source="ATR_REBAL", order_type="MARKET", client_order_id="u:005930:S:202611021000:SL:0"))
+    finally:
+        gw.set_transport(None)
+    assert res["status"] == "submitted"
+    approval, order = bodies[0][1], bodies[1][1]
+    assert approval["orderType"] == "MARKET" and approval["price"] == 0 and approval["side"] == "SELL" and approval["quantity"] == 7
+    assert {k: v for k, v in order.items() if k != "approvalToken"} == approval
+    assert added[0].order_type == "MARKET" and added[0].source == "ATR_REBAL"

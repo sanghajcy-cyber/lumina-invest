@@ -97,7 +97,7 @@ class Settings(BaseSettings):
     # ── KIS 자동매매 실주문 게이트웨이 (stock-coin-trade Open API, 계약: docs/contracts/kis-autotrade-api.md) ──
     # 비어 있으면 게이트웨이를 쓰지 않고 기존 KISClient 직접 호출(레거시)로 폴백한다.
     STOCK_COIN_TRADE_BASE_URL: str = ""            # 예: https://stock.example.com
-    STOCK_COIN_TRADE_API_KEY: str = ""             # stock-coin-trade에서 발급한 Open API 키 (KIS_AUTOTRADE_API_KEY_IDS 등록 필요)
+    STOCK_COIN_TRADE_API_KEY: str = ""             # stock-coin-trade에서 발급한 Open API 키. KIS 주문 권한은 st DB api_key.scopes 에 kis:order(또는 kis:*) 부여 필요 — 운영자가 UPDATE, env 화이트리스트(KIS_AUTOTRADE_API_KEY_IDS)는 2026-10-02 폐기
     STOCK_COIN_TRADE_TIMEOUT: float = 15.0
     STOCK_COIN_TRADE_ORDER_TIMEOUT: float = 45.0   # 승인·주문 호출 전용. st 가 KIS 토큰+주문을 순차 호출하면 15초를 넘길 수 있다(2026-10-06 UNKNOWN 사고)
     STOCK_COIN_TRADE_UNKNOWN_RESUBMIT_MIN: int = 10

@@ -220,11 +220,12 @@ def test_sells_first_capped_by_account_and_spread_over_ticks(env):
         e.repo.add(StrategyPosition(plan_id=e.plan.id, symbol=f"{i:06d}", name="", quantity=10, avg_price=9_000.0, atr_source="none"))
     out = tick(e, at(9, 10))
     sides = [p["side"] for p in out["processed"]]
-    assert sides == ["SELL"] * 4 + ["BUY"] * 2 and out["deferred"] == 2               # 매도 먼저, tick 당 6종목
+    assert ex.MAX_SYMBOLS_PER_TICK == 4
+    assert sides == ["SELL"] * 4 and out["deferred"] == 4                              # 매도 먼저, tick 당 4종목(호출 예산)
     sell = next(p for p in e.fb.placed if p[1] == "SELL")
     assert sell[2] == 1 and sell[3] == 9_990                                           # 계좌 3주 한도, min(65,3)=3회 → 1주, 현재가 −1틱
     out2 = tick(e, at(9, 11))
-    assert [p["side"] for p in out2["processed"]] == ["BUY", "BUY"] and out2["deferred"] == 0
+    assert [p["side"] for p in out2["processed"]] == ["BUY"] * 4 and out2["deferred"] == 0   # 같은 회차 다음 tick
 
 
 def test_daily_loss_blocks_buys_not_sells_and_cooldown_is_clamped(env):

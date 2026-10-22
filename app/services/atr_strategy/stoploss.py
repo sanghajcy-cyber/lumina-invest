@@ -11,9 +11,12 @@ Beat `strategy.stop_loss_watch` 가 거래일 09:05~15:15 매분 호출한다. �
 손절가 = 장부 평균가 − ATR×배수(리밸런싱 날 고정한 ATR), ATR 이 없으면 평균가 × (1 + 손절%).
 손절 매도는 risk_guard 일손실 한도·일 주문 수·쿨다운과 전략 일 주문 수 한도에 막히지 않는다.
 같은 종목에 손절 주문이 열려 있거나 체결 확인 대기 중이면 새 손절을 내지 않는다. 같은 날 실패가 MAX_STOP_FAILURES 번이면 멈추고 알린다.
+게이트웨이 409 ORDER_IN_PROGRESS(다른 주문 처리 중)는 실패로 세지 않고 새 clientOrderId 로 재시도하고,
+429 RATE_LIMITED 는 실패로 세지 않고 다음 감시에서 이어서 한다.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import date, datetime, time
@@ -31,6 +34,10 @@ KST = planner.KST
 WATCH_START = time(9, 5)
 WATCH_END = time(15, 15)          # 15:20 부터 종가 단일가라 시장가가 바로 체결되지 않는다
 MAX_STOP_FAILURES = 3
+# st 는 같은 환경의 주문을 하나씩만 처리하고 겹치면 즉시 409 ORDER_IN_PROGRESS 를 준다(대기 없음).
+# 손절 실패로 세지 않고 몇 초 뒤 새 clientOrderId 로 승인부터 다시 받는다. 3초 × 3회 = 9초 < 종목 잠금 50초.
+ORDER_IN_PROGRESS_RETRY_SEC = 3
+ORDER_IN_PROGRESS_RETRIES = 3
 _STOP_TERMINAL = {"FILLED": "filled", "CANCELLED": "failed", "REJECTED": "failed", "ERROR": "failed", "LOST": "failed"}
 
 
@@ -127,20 +134,38 @@ async def _execute_stop(repo: ex.Repo, plan: StrategyPlan, ev: StrategyStopEvent
         ev.status, ev.reason = "skipped", f"매도 가능 수량 없음 (장부 {held}, 계좌 {account_qty.get(ev.symbol, 0)})"
         return
     ev.quantity = qty
-    ev.status = "planned"
-    ev.client_order_id = gateway.make_client_order_id(plan.user_id, ev.symbol, "sell", now=now, tag=ex.STOP_TAG, seq=ev.seq)
-    await repo.commit()                     # 주문 전에 기록 — 재시작 시 같은 손절을 두 번 내지 않는다
-    res = await auto_trade._place_live_order_via_gateway(
-        repo.db, None, ev.symbol, ev.name or ev.symbol, "sell", qty, float(ev.trigger_price), str(plan.user_id),
-        source=LIVE_ORDER_SOURCE_ATR_REBAL, order_type="MARKET", client_order_id=ev.client_order_id,
-    )
-    lo = await repo.live_order_by_client_id(ev.client_order_id)
-    ev.live_order_id = lo.id if lo is not None else None
-    if res.get("status") == "submitted" or (lo is not None and lo.status == "UNKNOWN"):
-        ev.status = "submitted"             # UNKNOWN: confirm_fills 가 멱등 재전송·확인
-    else:
-        ev.status = "failed"
-        ev.reason = str(res.get("reason") or res.get("error") or res.get("code") or res.get("status"))[:300]
+    for attempt in range(ORDER_IN_PROGRESS_RETRIES + 1):
+        # 시도마다 새 clientOrderId → 게이트웨이 승인(order-approval)부터 다시 받는다. seq 끝자리가 시도 번호.
+        ev.status = "planned"
+        ev.client_order_id = gateway.make_client_order_id(plan.user_id, ev.symbol, "sell", now=now, tag=ex.STOP_TAG,
+                                                          seq=ev.seq * 10 + attempt)
+        await repo.commit()                 # 주문 전에 기록 — 재시작 시 같은 손절을 두 번 내지 않는다
+        res = await auto_trade._place_live_order_via_gateway(
+            repo.db, None, ev.symbol, ev.name or ev.symbol, "sell", qty, float(ev.trigger_price), str(plan.user_id),
+            source=LIVE_ORDER_SOURCE_ATR_REBAL, order_type="MARKET", client_order_id=ev.client_order_id,
+        )
+        lo = await repo.live_order_by_client_id(ev.client_order_id)
+        ev.live_order_id = lo.id if lo is not None else None
+        if res.get("status") == "submitted" or (lo is not None and lo.status == "UNKNOWN"):
+            ev.status = "submitted"         # UNKNOWN: confirm_fills 가 멱등 재전송·확인
+            return
+        if res.get("code") == "RATE_LIMITED":
+            # 분당 60회 한도 — 몇 초 재시도로는 풀리지 않는다. 실패로 세지 않고 다음 감시(1분 뒤)에서 이어서 한다.
+            ev.status, ev.live_order_id = "waiting", None
+            ev.reason = "게이트웨이 호출 한도(429 RATE_LIMITED) — 다음 감시에서 재시도"
+            return
+        if res.get("code") != "ORDER_IN_PROGRESS":
+            ev.status = "failed"
+            ev.reason = str(res.get("reason") or res.get("error") or res.get("code") or res.get("status"))[:300]
+            return
+        if attempt < ORDER_IN_PROGRESS_RETRIES:
+            logger.info("ATR 전략 손절 %s: 게이트웨이 주문 처리 중(409) — %d초 뒤 재시도 %d/%d",
+                        ev.symbol, ORDER_IN_PROGRESS_RETRY_SEC, attempt + 1, ORDER_IN_PROGRESS_RETRIES)
+            await asyncio.sleep(ORDER_IN_PROGRESS_RETRY_SEC)
+    # 계속 409 — 실패로 세지 않고 다음 감시(1분 뒤)에서 같은 이벤트로 이어서 한다
+    ev.status = "waiting"
+    ev.live_order_id = None
+    ev.reason = f"게이트웨이 주문 처리 중(409 ORDER_IN_PROGRESS) {ORDER_IN_PROGRESS_RETRIES + 1}회 — 다음 감시에서 재시도"
 
 
 async def watch_plan(repo: ex.Repo, plan: StrategyPlan, now: datetime) -> dict:
