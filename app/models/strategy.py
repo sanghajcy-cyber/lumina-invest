@@ -8,7 +8,8 @@ KIS 모의계좌(stock-coin-trade 게이트웨이)를 기존 auto_trade 와 같�
   StrategyTarget   업로드한 목표 포트폴리오(종목·정규화 비중·파일 ATR)
   StrategyPosition 전략 전용 장부(수량·평균가·리밸런싱 날 고정한 ATR)
   StrategyRun      dry-run / 리밸런싱 1회의 계획 스냅샷(실효 투자금액·경고·종목별 계획 행)
-  StrategySlice    리밸런싱 날 시분할 주문 1회차 (4단계에서 채움)
+  StrategySlice    리밸런싱 날 시분할 주문 1회차
+  StrategyStopEvent 손절 1건(조건 충족 → 리밸런싱 주문 취소 → 장부 수량 시장가 매도). 리밸런싱 없는 날에도 생긴다
 """
 from __future__ import annotations
 
@@ -26,6 +27,8 @@ ATR_SOURCES = ("file", "kis", "none")          # none: 파일에 없고 KIS 계�
 RUN_KINDS = ("dry_run", "rebalance")
 RUN_STATUSES = ("planned", "running", "done", "failed", "skipped")
 SLICE_STATUSES = ("planned", "submitted", "skipped", "cancelled", "filled", "failed")
+# waiting: 같은 종목 리밸런싱 주문 취소 확인 대기(다음 감시에서 이어서) · planned: 주문 직전 기록
+STOP_STATUSES = ("waiting", "planned", "submitted", "filled", "failed", "skipped")
 
 
 class StrategyPlan(Base, UUIDPkMixin, CreatedAtMixin, UpdatedAtMixin):
@@ -132,3 +135,30 @@ class StrategySlice(Base, UUIDPkMixin, CreatedAtMixin, UpdatedAtMixin):
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     filled_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)        # 장부에 이미 반영한 체결 수량
     avg_fill_price: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+
+
+class StrategyStopEvent(Base, UUIDPkMixin, CreatedAtMixin, UpdatedAtMixin):
+    __tablename__ = "strategy_stop_events"
+    __table_args__ = (
+        Index("ix_strategy_stop_events_plan_day_symbol", "plan_id", "trade_date", "symbol"),
+        UniqueConstraint("plan_id", "trade_date", "symbol", "seq", name="uq_strategy_stop_events_seq"),
+    )
+
+    plan_id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("strategy_plans.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False)          # KST
+    symbol: Mapped[str] = mapped_column(String(6), nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)    # 같은 날 같은 종목 재시도 번호
+    status: Mapped[str] = mapped_column(String(10), nullable=False, default="waiting")
+    trigger_price: Mapped[float] = mapped_column(Float, nullable=False, default=0)   # 조건을 판정한 현재가
+    avg_price: Mapped[float] = mapped_column(Float, nullable=False, default=0)       # 장부 평균가
+    atr: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stop_price: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    basis: Mapped[str] = mapped_column(String(40), nullable=False, default="")
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    client_order_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    live_order_id: Mapped[uuid.UUID | None] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("live_orders.id"), nullable=True)
+    filled_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    avg_fill_price: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    reason: Mapped[str] = mapped_column(String(300), nullable=False, default="")
