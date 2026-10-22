@@ -21,7 +21,6 @@ class MemRepo:
         self.db = SimpleNamespace(name="memdb")
         self.plan, self.broker = plan, broker_row
         self.runs, self.slices_, self.positions_, self.orders, self.stops = [], [], [], [], []
-        self.targets = set()
         self.commits = 0
     def add(self, obj):
         if getattr(obj, "id", None) is None:
@@ -45,8 +44,6 @@ class MemRepo:
     async def pending_slices(self, plan): return [s for s in self.slices_ if s.status == "submitted"]
     async def stop_events(self, plan, day=None): return [e for e in self.stops if day is None or e.trade_date == day]
     async def pending_stop_events(self, plan): return [e for e in self.stops if e.status in ("submitted", "planned")]
-    async def target_symbols(self, plan):
-        return set(self.targets) or {r["symbol"] for run in self.runs for r in run.rows if r.get("in_portfolio")}
     async def positions(self, plan): return list(self.positions_)
     async def open_rebalance_orders(self, uid, symbol=None):
         return [o for o in self.orders if o.status in ex.LIVE_ORDER_OPEN_STATUSES and ":ATR" in o.client_order_id

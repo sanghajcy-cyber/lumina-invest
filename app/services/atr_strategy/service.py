@@ -301,11 +301,31 @@ async def set_active(db: AsyncSession, user_id: uuid.UUID, active: bool, dry_run
                                                                 StrategyPlan.user_id != user_id).limit(1))).scalar_one_or_none()
             if other is not None:
                 raise StrategyError("다른 사용자의 ATR 전략이 같은 KIS 모의계좌에서 이미 실행 중입니다.")
+    warnings: list[str] = []
+    if not active and plan.is_active and not plan.dry_run:
+        warnings = await deactivate_warnings(db, plan)
     plan.is_active = bool(active)
     plan.dry_run = bool(dry_run) if active else plan.dry_run
     await db.commit()
     if active and not dry_run:
         stopped = await force_off_live_kis_auto_trade(db, "ATR 전략 활성화")
     await audit(str(user_id), "", "strategy.atr_rebal." + ("activate" if active else "deactivate"),
-                {"dry_run": plan.dry_run, "stopped_auto_trade": stopped})
-    return {"plan": plan_to_dict(plan), "stopped_auto_trade": stopped}
+                {"dry_run": plan.dry_run, "stopped_auto_trade": stopped, "warnings": warnings})
+    return {"plan": plan_to_dict(plan), "stopped_auto_trade": stopped, "warnings": warnings}
+
+
+async def deactivate_warnings(db: AsyncSession, plan: StrategyPlan) -> list[str]:
+    """실주문 모드 전략을 끌 때 남는 위험: 손절 감시 없이 남는 장부 종목, 정리되지 않는 열린 리밸런싱 주문."""
+    from app.models import LIVE_ORDER_OPEN_STATUSES, LIVE_ORDER_SOURCE_ATR_REBAL, LiveOrder
+    out = []
+    ledger = await load_ledger(db, plan)
+    if ledger:
+        names = ", ".join(f"{s} {v.get('name') or ''} {v['quantity']}주".strip() for s, v in sorted(ledger.items()))
+        out.append(f"장부에 보유 종목 {len(ledger)}개가 손절 감시 없이 남습니다: {names}")
+    open_orders = (await db.execute(select(LiveOrder).where(
+        LiveOrder.user_id == plan.user_id, LiveOrder.source == LIVE_ORDER_SOURCE_ATR_REBAL,
+        LiveOrder.status.in_(LIVE_ORDER_OPEN_STATUSES)))).scalars().all()
+    if open_orders:
+        out.append(f"열린 전략 주문 {len(open_orders)}건은 자동으로 취소·정리되지 않습니다. "
+                   "끄기 전에 /rebalance/stop 으로 취소하거나 KIS 에서 직접 확인하세요.")
+    return out

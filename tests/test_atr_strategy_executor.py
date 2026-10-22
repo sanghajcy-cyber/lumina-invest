@@ -251,6 +251,24 @@ def test_strategy_daily_order_limit(env):
     assert "전략 일 주문 수 한도 1" in out["processed"][0]["reason"] and len(e.fb.placed) == 1
 
 
+def test_excluded_ledger_symbol_is_sold_by_slices_until_1430_and_never_bought(env):
+    rows = [_row("000660", 0, 10_000, in_portfolio=False, excluded=True)]
+    e = env(rows, {"000660": {"price": 10_000, "open": 10_000}},
+            balance={"cashBalance": 1e8, "totalEvalAmount": 1e8, "holdings": [{"symbol": "000660", "quantity": 4}]})
+    start(e)
+    e.repo.add(StrategyPosition(plan_id=e.plan.id, symbol="000660", name="", quantity=4, avg_price=9_000.0, atr_source="none"))
+    out = tick(e, at(9, 10))
+    assert [(p["side"], p["status"], p["qty"]) for p in out["processed"]] == [("SELL", "submitted", 1)]   # min(65,4)=4회 → 1주
+    assert e.fb.placed[-1][3] == 9_990                                                  # 현재가 − 1틱
+    e.fb.fill(e.repo.orders[-1].order_no, 1)
+    assert tick(e, at(14, 31))["processed"] == []                                       # 매도는 14:30 마감
+    out = tick(e, at(14, 30))
+    assert out["processed"][0]["side"] == "SELL" and out["processed"][0]["qty"] == 3    # 마지막 회차: 남은 3주
+    assert all(p[1] == "SELL" for p in e.fb.placed)                                     # 매수는 없다
+    run(ex.finalize(e.repo, e.plan, e.repo.runs[0], at(15, 20)))
+    assert e.repo.runs[0].summary["result"][0]["excluded"] is True
+
+
 def test_halted_symbol_is_skipped(env):
     e = env([_row("005930", 5, 10_000, halted=True)], {"005930": {"price": 10_000, "open": 10_000}})
     start(e)
@@ -286,7 +304,7 @@ def test_cancel_all_at_15_and_finalize_at_1520(env):
     out = tick(e, at(15, 20))
     assert out["finalized"] and r.status == "done" and r.finished_at is not None
     assert r.summary["result"] == [{"symbol": "005930", "name": "005930", "target_qty": 5, "ledger_qty": 2, "diff": 3,
-                                    "band_skips": 0, "halted": False}]
+                                    "band_skips": 0, "halted": False, "excluded": False}]
     assert tick(e, at(15, 21)) == {"skipped": "run_done"}
 
 

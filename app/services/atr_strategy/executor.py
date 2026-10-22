@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
     BrokerSettings, LiveOrder, LIVE_ORDER_OPEN_STATUSES, LIVE_ORDER_SOURCE_ATR_REBAL,
-    StrategyPlan, StrategyPosition, StrategyRun, StrategySlice, StrategyStopEvent, StrategyTarget,
+    StrategyPlan, StrategyPosition, StrategyRun, StrategySlice, StrategyStopEvent,
 )
 from app.services import risk_guard
 from app.services.atr_strategy import planner
@@ -174,9 +174,6 @@ class Repo:
     async def pending_stop_events(self, plan: StrategyPlan) -> list[StrategyStopEvent]:
         return list((await self.db.execute(select(StrategyStopEvent).where(
             StrategyStopEvent.plan_id == plan.id, StrategyStopEvent.status.in_(("submitted", "planned"))))).scalars().all())
-
-    async def target_symbols(self, plan: StrategyPlan) -> set[str]:
-        return set((await self.db.execute(select(StrategyTarget.symbol).where(StrategyTarget.plan_id == plan.id))).scalars().all())
 
     async def positions(self, plan: StrategyPlan) -> list[StrategyPosition]:
         return list((await self.db.execute(select(StrategyPosition).where(StrategyPosition.plan_id == plan.id))).scalars().all())
@@ -442,12 +439,12 @@ async def finalize(repo: Repo, plan: StrategyPlan, run: StrategyRun, now: dateti
     stopped = {e.symbol for e in await repo.stop_events(plan, run.run_date)}
     result = []
     for r in run.rows:
-        if not r.get("in_portfolio") or r.get("target_qty") is None:
+        if not (r.get("in_portfolio") or r.get("excluded")) or r.get("target_qty") is None:
             continue
         held = int((ledger.get(r["symbol"]) or {}).get("quantity") or 0)
         result.append({"symbol": r["symbol"], "name": r.get("name"), "target_qty": r["target_qty"], "ledger_qty": held,
                        "diff": int(r["target_qty"]) - held, "band_skips": int(r.get("band_skips") or 0),
-                       "halted": bool(r.get("halted")) or r["symbol"] in stopped})
+                       "halted": bool(r.get("halted")) or r["symbol"] in stopped, "excluded": bool(r.get("excluded"))})
     summary = dict(run.summary or {})
     summary["result"] = result
     summary["result_mismatch"] = sum(1 for x in result if x["diff"])
@@ -635,7 +632,9 @@ async def process_round(repo: Repo, plan: StrategyPlan, run: StrategyRun, now: d
             continue
         seq, rounds_left = rnd
         for row in rows:
-            if not row.get("in_portfolio") or row.get("target_qty") is None or row.get("halted") or row["symbol"] in blocked:
+            # 목표 종목 + 목표에서 빠진 장부 종목(excluded, 목표수량 0 → 전량 매도). 장부에 없는 계좌 종목은 행 자체가 없다.
+            tradable = row.get("in_portfolio") or row.get("excluded")
+            if not tradable or row.get("target_qty") is None or row.get("halted") or row["symbol"] in blocked:
                 continue
             if (side, seq, row["symbol"]) in done:
                 continue

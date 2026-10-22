@@ -5,7 +5,7 @@ Beat `strategy.stop_loss_watch` 가 거래일 09:05~15:15 매분 호출한다. �
   1) 아직 반영 안 된 체결(리밸런싱 회차·손절 주문)을 장부에 반영
   2) 장부 동기화: 계좌 보유수량이 장부보다 적으면(사람이 HTS·앱에서 수동 매도) 장부를 계좌 수량으로 줄인다.
      그 종목에 매도 주문(리밸런싱·손절)이 열려 있으면 체결이 아직 확인되지 않았을 수 있어 이번에는 건너뛴다.
-  3) 목표 파일에 있는 장부 종목마다 현재가(잔고 1회 조회) ≤ 손절가 이면 손절:
+  3) 장부에 수량이 남은 종목마다(목표 종목 + 목표에서 빠져 매도 중인 종목) 현재가(잔고 1회 조회) ≤ 손절가 이면 손절:
      종목 잠금 → 그 종목 리밸런싱 주문(매수·매도) 취소 → 확인 → 체결 반영 → 장부 수량 전량 시장가 매도.
      취소가 확인되지 않으면 waiting 으로 남겨 다음 감시에서 이어서 한다(그동안 리밸런싱은 이 종목을 건드리지 않음).
 손절가 = 장부 평균가 − ATR×배수(리밸런싱 날 고정한 ATR), ATR 이 없으면 평균가 × (1 + 손절%).
@@ -168,12 +168,12 @@ async def watch_plan(repo: ex.Repo, plan: StrategyPlan, now: datetime) -> dict:
     adjustments = await sync_ledger_with_account(repo, plan, account_qty)
     await repo.flush()
 
-    targets = await repo.target_symbols(plan)
+    # 대상 = 장부 수량이 남은 모든 종목. 목표에서 빠진 종목도 매도가 끝날 때까지 감시한다. 장부에 없는 계좌 종목은 대상이 아니다.
     events = await repo.stop_events(plan, today)
     out = {"adjustments": adjustments, "stops": []}
     for pos in await repo.positions(plan):
         sym = pos.symbol
-        if int(pos.quantity or 0) <= 0 or sym not in targets:
+        if int(pos.quantity or 0) <= 0:
             continue
         mine = [e for e in events if e.symbol == sym]
         if await repo.open_stop_orders(plan.user_id, sym) or any(e.status in ("submitted", "planned") for e in mine):
