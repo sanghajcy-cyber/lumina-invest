@@ -100,6 +100,11 @@ celery_app.conf.update(
             "schedule": crontab(minute="0,1,2,20,21,22", hour="15", day_of_week="mon-fri"),
             "options": {"expires": 50},
         },
+        "strategy-stop-loss-watch": {
+            "task": "strategy.stop_loss_watch",
+            "schedule": crontab(minute="*", hour="9-15", day_of_week="mon-fri"),   # 09:05~15:15 는 태스크 안에서 거른다
+            "options": {"expires": 50},
+        },
         "rebalance-check-hourly": {
             "task": "rebalance.check_triggers",
             "schedule": 3600.0,           # 1시간 — 시간·이탈률 리밸런싱 트리거 점검

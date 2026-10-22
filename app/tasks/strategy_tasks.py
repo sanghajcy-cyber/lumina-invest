@@ -28,3 +28,26 @@ def strategy_rebalance_tick() -> dict:
     if result and result.get("skipped") not in ("live_execution_not_approved", "not_trading_day"):
         logger.info("[beat] strategy.rebalance_tick: %s", result)
     return result
+
+
+@celery_app.task(name="strategy.stop_loss_watch", time_limit=55, ignore_result=True)
+def strategy_stop_loss_watch() -> dict:
+    """거래일 09:05~15:15 매분 손절 감시·장부 동기화. 리밸런싱 중지와 무관, kill switch 만 예외."""
+
+    async def _async() -> dict:
+        from app.database.postgres import connect_postgres, close_postgres
+        from app.lib.redis_cache import connect_redis, close_redis
+        from app.services.atr_strategy.stoploss import stop_loss_watch
+
+        await connect_redis()
+        await connect_postgres()
+        try:
+            return await stop_loss_watch()
+        finally:
+            await close_redis()
+            await close_postgres()
+
+    result = asyncio.run(_async())
+    if result and result.get("skipped") not in ("live_execution_not_approved", "not_trading_day", "outside_window"):
+        logger.info("[beat] strategy.stop_loss_watch: %s", result)
+    return result

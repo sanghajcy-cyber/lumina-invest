@@ -28,7 +28,7 @@ from app.models.paper import (
     PAPER_INITIAL_CASH,
 )
 from app.models.rebalance import RebalancePlan, CashflowEvent, RebalanceRun
-from app.models.strategy import StrategyPlan, StrategyTarget, StrategyPosition, StrategyRun, StrategySlice
+from app.models.strategy import StrategyPlan, StrategyTarget, StrategyPosition, StrategyRun, StrategySlice, StrategyStopEvent
 from app.models.tradingview import WebhookSignal, StrategyComparison
 from app.models.formula import FormulaIndicator, FormulaIndicatorVersion, FormulaIndicatorResult
 from app.models.chat import Conversation, Chat
@@ -115,4 +115,5 @@ __all__ = [
     "StrategyPosition",
     "StrategyRun",
     "StrategySlice",
+    "StrategyStopEvent",
 ]

@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
     BrokerSettings, LiveOrder, LIVE_ORDER_OPEN_STATUSES, LIVE_ORDER_SOURCE_ATR_REBAL,
-    StrategyPlan, StrategyPosition, StrategyRun, StrategySlice,
+    StrategyPlan, StrategyPosition, StrategyRun, StrategySlice, StrategyStopEvent, StrategyTarget,
 )
 from app.services import risk_guard
 from app.services.atr_strategy import planner
@@ -38,10 +38,12 @@ from app.services.brokers import stock_coin_trade_gateway as gateway
 logger = logging.getLogger(__name__)
 
 KST = planner.KST
-REBAL_TAG = "ATR"                 # clientOrderId 태그 ATR{attempt} — 손절(5단계)은 다른 태그를 쓴다
+REBAL_TAG = "ATR"                 # clientOrderId 태그 ATR{attempt}
+STOP_TAG = "SL"                   # 손절 주문 태그 — 리밸런싱 취소·일괄 취소·중지 대상이 아니다
 MAX_SYMBOLS_PER_TICK = 6          # 종목당 호출 ≈ 시세 1 + 상태·취소 0~3 + 주문 2 → tick 당 ≤ 36회
 FINALIZE_AT = time(15, 20)
 LOCK_TTL_SEC = 55
+SYMBOL_LOCK_TTL_SEC = 50          # 리밸런싱 tick 과 손절 감시가 같은 종목을 동시에 건드리지 않게
 
 
 def now_kst() -> datetime:
@@ -150,6 +152,35 @@ class Repo:
     async def ledger(self, plan: StrategyPlan) -> dict[str, dict]:
         return await svc.load_ledger(self.db, plan)
 
+    async def open_stop_orders(self, user_id: uuid.UUID, symbol: str | None = None) -> list[LiveOrder]:
+        stmt = select(LiveOrder).where(LiveOrder.user_id == user_id, LiveOrder.source == LIVE_ORDER_SOURCE_ATR_REBAL,
+                                       LiveOrder.status.in_(LIVE_ORDER_OPEN_STATUSES),
+                                       LiveOrder.client_order_id.like(f"%:{STOP_TAG}:%"))
+        if symbol:
+            stmt = stmt.where(LiveOrder.symbol == symbol)
+        return list((await self.db.execute(stmt)).scalars().all())
+
+    async def pending_slices(self, plan: StrategyPlan) -> list[StrategySlice]:
+        """체결이 아직 다 반영되지 않았을 수 있는 회차(모든 날짜). confirm_fills 가 장 마감 뒤에 늦게 갱신한 체결도 놓치지 않는다."""
+        return list((await self.db.execute(select(StrategySlice).where(StrategySlice.plan_id == plan.id,
+                                                                       StrategySlice.status == "submitted"))).scalars().all())
+
+    async def stop_events(self, plan: StrategyPlan, day: date | None = None) -> list[StrategyStopEvent]:
+        stmt = select(StrategyStopEvent).where(StrategyStopEvent.plan_id == plan.id)
+        if day is not None:
+            stmt = stmt.where(StrategyStopEvent.trade_date == day)
+        return list((await self.db.execute(stmt.order_by(StrategyStopEvent.created_at))).scalars().all())
+
+    async def pending_stop_events(self, plan: StrategyPlan) -> list[StrategyStopEvent]:
+        return list((await self.db.execute(select(StrategyStopEvent).where(
+            StrategyStopEvent.plan_id == plan.id, StrategyStopEvent.status.in_(("submitted", "planned"))))).scalars().all())
+
+    async def target_symbols(self, plan: StrategyPlan) -> set[str]:
+        return set((await self.db.execute(select(StrategyTarget.symbol).where(StrategyTarget.plan_id == plan.id))).scalars().all())
+
+    async def positions(self, plan: StrategyPlan) -> list[StrategyPosition]:
+        return list((await self.db.execute(select(StrategyPosition).where(StrategyPosition.plan_id == plan.id))).scalars().all())
+
     async def orders_placed_today(self, plan: StrategyPlan, day: date) -> int:
         stmt = (select(func.count(StrategySlice.id)).join(StrategyRun, StrategyRun.id == StrategySlice.run_id)
                 .where(StrategyRun.plan_id == plan.id, StrategyRun.run_date == day, StrategySlice.live_order_id.is_not(None)))
@@ -190,6 +221,29 @@ def lock_key(environment: str) -> str:
     return f"strategy:acct-lock:kis:{environment}"
 
 
+def symbol_lock_key(environment: str, symbol: str) -> str:
+    return f"strategy:sym-lock:kis:{environment}:{symbol}"
+
+
+async def acquire_symbol_lock(environment: str, symbol: str) -> bool:
+    key = symbol_lock_key(environment, symbol)
+    r = risk_guard._redis()
+    if r is not None:
+        try:
+            return bool(await r.set(key, str(_time.time()), nx=True, ex=SYMBOL_LOCK_TTL_SEC))
+        except Exception as exc:
+            logger.warning("종목 잠금 redis 실패, 메모리 폴백: %s", exc)
+    now = _time.time()
+    if _mem_lock.get(key, 0) > now:
+        return False
+    _mem_lock[key] = now + SYMBOL_LOCK_TTL_SEC
+    return True
+
+
+async def release_symbol_lock(environment: str, symbol: str) -> None:
+    await _release_lock(symbol_lock_key(environment, symbol))
+
+
 # ── 장부 반영 ───────────────────────────────────────────────────────────
 
 
@@ -217,9 +271,18 @@ _TERMINAL_SLICE = {"FILLED": "filled", "CANCELLED": "cancelled", "REJECTED": "fa
 
 
 async def sync_fills(repo: Repo, plan: StrategyPlan, run: StrategyRun) -> int:
-    """회차에 연결된 live_orders 의 체결 증가분을 장부에 반영. 반영한 수량 합을 돌려준다."""
+    """오늘 실행의 회차 체결 증가분을 장부에 반영. 반영한 수량 합을 돌려준다."""
+    return await _sync_slices(repo, plan, await repo.slices(run))
+
+
+async def sync_all_pending(repo: Repo, plan: StrategyPlan) -> int:
+    """날짜와 무관하게 submitted 로 남은 모든 회차의 체결을 반영(장 마감 뒤 늦은 체결 확인 포함)."""
+    return await _sync_slices(repo, plan, await repo.pending_slices(plan))
+
+
+async def _sync_slices(repo: Repo, plan: StrategyPlan, slices: list[StrategySlice]) -> int:
     applied = 0
-    for sl in await repo.slices(run):
+    for sl in slices:
         if not sl.live_order_id or sl.status not in ("submitted",):
             continue
         lo = await repo.live_order(sl.live_order_id)
@@ -331,6 +394,15 @@ async def start_rebalance(db: AsyncSession, user_id: uuid.UUID, *, manual: bool,
         await sync_fills(repo, plan, run)
         await repo.flush()
 
+    # 계획 전에 늦게 확인된 체결을 반영하고 장부를 계좌 수량에 맞춘다(수동 매도 반영)
+    await sync_all_pending(repo, plan)
+    from app.services.atr_strategy import stoploss
+    try:
+        _cash, acct = await svc.account_snapshot()
+        await stoploss.sync_ledger_with_account(repo, plan, acct)
+    except svc.StrategyError as exc:
+        raise svc.StrategyError(f"장부 동기화 실패: {exc}") from exc
+    await repo.flush()
     fields = await svc.compute_plan(db, plan, user_id, "rebalance", today)
     if run is None:
         run = StrategyRun(plan_id=plan.id, user_id=user_id, run_date=today, kind="rebalance", attempt=0, **fields)
@@ -367,6 +439,7 @@ async def finalize(repo: Repo, plan: StrategyPlan, run: StrategyRun, now: dateti
     await sync_fills(repo, plan, run)
     await repo.flush()
     ledger = await repo.ledger(plan)
+    stopped = {e.symbol for e in await repo.stop_events(plan, run.run_date)}
     result = []
     for r in run.rows:
         if not r.get("in_portfolio") or r.get("target_qty") is None:
@@ -374,7 +447,7 @@ async def finalize(repo: Repo, plan: StrategyPlan, run: StrategyRun, now: dateti
         held = int((ledger.get(r["symbol"]) or {}).get("quantity") or 0)
         result.append({"symbol": r["symbol"], "name": r.get("name"), "target_qty": r["target_qty"], "ledger_qty": held,
                        "diff": int(r["target_qty"]) - held, "band_skips": int(r.get("band_skips") or 0),
-                       "halted": bool(r.get("halted"))})
+                       "halted": bool(r.get("halted")) or r["symbol"] in stopped})
     summary = dict(run.summary or {})
     summary["result"] = result
     summary["result_mismatch"] = sum(1 for x in result if x["diff"])
@@ -393,9 +466,10 @@ async def stop_rebalance(db: AsyncSession, user_id: uuid.UUID, now: datetime | N
     run = await repo.today_run(plan, now.date()) if plan else None
     if run is None or run.status != "running":
         raise svc.StrategyError("진행 중인 오늘 리밸런싱이 없습니다.")
-    await cancel_all(repo, plan, run, "수동 중지")
+    cancelled = await cancel_all(repo, plan, run, "수동 중지")
     summary = dict(run.summary or {})
     summary["cancelled_at"] = now.isoformat()
+    summary["stop_cancel"] = cancelled          # still_open > 0 이면 Beat tick 이 이어서 취소한다
     run.summary = summary
     await finalize(repo, plan, run, now, status="skipped", note="수동 중지")
     await repo.commit()
@@ -404,6 +478,13 @@ async def stop_rebalance(db: AsyncSession, user_id: uuid.UUID, now: datetime | N
 
 
 # ── 회차 처리 ───────────────────────────────────────────────────────────
+
+
+async def stop_blocked_symbols(repo: Repo, plan: StrategyPlan, user_id: uuid.UUID, day: date) -> set[str]:
+    """오늘 손절 이벤트가 있거나 손절 주문이 열려 있는 종목 — 리밸런싱은 이 종목을 취소도 주문도 하지 않는다."""
+    blocked = {e.symbol for e in await repo.stop_events(plan, day)}
+    blocked |= {o.symbol for o in await repo.open_stop_orders(user_id)}
+    return blocked
 
 
 async def _buy_block_reason(plan: StrategyPlan, broker_row: BrokerSettings | None, equity: float) -> str | None:
@@ -425,6 +506,19 @@ def buy_cooldown_min(broker_row: BrokerSettings | None) -> int:
 
 async def _process_symbol(repo: Repo, plan: StrategyPlan, run: StrategyRun, row: dict, side: str, seq: int, rounds_left: int,
                           ctx: dict, now: datetime) -> StrategySlice:
+    sym, uid = row["symbol"], run.user_id
+    if not await acquire_symbol_lock(plan.environment, sym):
+        return None                       # 손절 감시가 이 종목을 처리 중 — 기록 없이 다음 tick 에 다시 본다
+    try:
+        if sym in await stop_blocked_symbols(repo, plan, uid, run.run_date):
+            return None
+        return await _process_symbol_locked(repo, plan, run, row, side, seq, rounds_left, ctx, now)
+    finally:
+        await release_symbol_lock(plan.environment, sym)
+
+
+async def _process_symbol_locked(repo: Repo, plan: StrategyPlan, run: StrategyRun, row: dict, side: str, seq: int,
+                                 rounds_left: int, ctx: dict, now: datetime) -> StrategySlice:
     from app.services import auto_trade, kis_market_data as kmd
 
     sym, uid = row["symbol"], run.user_id
@@ -531,6 +625,7 @@ async def process_round(repo: Repo, plan: StrategyPlan, run: StrategyRun, now: d
            "buy_block": await _buy_block_reason(plan, broker_row, equity), "cooldown_min": buy_cooldown_min(broker_row)}
 
     done = {(s.side, s.seq, s.symbol) for s in await repo.slices(run) if s.attempt == int(run.attempt or 0)}
+    blocked = await stop_blocked_symbols(repo, plan, run.user_id, run.run_date)
     ledger = await repo.ledger(plan)
     rows = copy.deepcopy(run.rows)
     todo = []
@@ -540,7 +635,7 @@ async def process_round(repo: Repo, plan: StrategyPlan, run: StrategyRun, now: d
             continue
         seq, rounds_left = rnd
         for row in rows:
-            if not row.get("in_portfolio") or row.get("target_qty") is None or row.get("halted"):
+            if not row.get("in_portfolio") or row.get("target_qty") is None or row.get("halted") or row["symbol"] in blocked:
                 continue
             if (side, seq, row["symbol"]) in done:
                 continue
@@ -554,7 +649,11 @@ async def process_round(repo: Repo, plan: StrategyPlan, run: StrategyRun, now: d
     processed = []
     for side, seq, rounds_left, row in todo[:MAX_SYMBOLS_PER_TICK]:
         sl = await _process_symbol(repo, plan, run, row, side, seq, rounds_left, ctx, now)
+        if sl is None:
+            processed.append({"symbol": row["symbol"], "side": side, "seq": seq, "status": "deferred", "qty": 0, "reason": "손절 처리 중"})
+            continue
         processed.append({"symbol": row["symbol"], "side": side, "seq": seq, "status": sl.status, "qty": sl.quantity, "reason": sl.reason})
+    # 손절 여부는 rows 가 아니라 strategy_stop_events 가 기준이다(손절 감시는 다른 프로세스라 rows 를 쓰지 않는다)
     run.rows = rows
     return {"processed": processed, "deferred": max(0, len(todo) - MAX_SYMBOLS_PER_TICK)}
 
@@ -575,6 +674,11 @@ async def tick_plan(repo: Repo, plan: StrategyPlan, now: datetime) -> dict:
             logger.warning("ATR 전략 자동 리밸런싱 시작 실패 user=%s: %s", plan.user_id, exc)
             return {"skipped": f"start_failed: {exc}"}
     if run.status != "running":
+        # 중지·확정 뒤에도 취소가 확인되지 않은 리밸런싱 주문이 남아 있으면 계속 정리한다(손절 주문은 건드리지 않음)
+        if await repo.open_rebalance_orders(run.user_id):
+            cleanup = await cancel_all(repo, plan, run, "중지/마감 뒤 잔여 주문 정리")
+            await repo.commit()
+            return {"skipped": f"run_{run.status}", "cleanup": cleanup}
         return {"skipped": f"run_{run.status}"}
     t = now.time()
     if t >= planner.CANCEL_ALL_AT:
