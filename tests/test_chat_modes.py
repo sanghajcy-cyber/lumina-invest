@@ -157,7 +157,7 @@ def test_rag_mode_uses_llm_summary_when_available(chat_app, monkeypatch):
     assert body["answer"].startswith("삼성전자 실적 근거에 따르면")
     assert len(body["chunks"]) == 2 and calls["agent"] == []
     assert seen["model"] == settings.LLM_MODEL and "삼성전자 실적" in seen["messages"][1]["content"]
-    assert seen["options"]["num_predict"] == 160
+    assert seen["options"]["num_predict"] == 320
 
 
 def test_rag_mode_with_no_docs(chat_app, monkeypatch):
