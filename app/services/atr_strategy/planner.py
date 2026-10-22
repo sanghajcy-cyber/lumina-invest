@@ -2,10 +2,11 @@
 
 용어
   장부(ledger)  : 이 전략이 산 수량·평균가(StrategyPosition). 계좌 전체 보유와 다를 수 있다.
-  실효 투자금액 : min(설정 투자금액, 목표 종목의 장부 평가액 + 예수금). 설정값이 더 크면 경고.
+  실효 투자금액 : min(설정 투자금액, 장부 전체 평가액 + 예수금). 설정값이 더 크면 경고.
+                  (목표에서 빠진 장부 종목도 그날 팔아 현금이 되므로 포함한다)
   목표수량      : floor(실효 투자금액 × 비중 ÷ 현재가)  (내림 — 주문가능금액을 넘기지 않게)
   매매수량      : 목표수량 − 장부 수량. 매도는 min(장부 수량, 계좌 보유수량)을 넘지 않는다.
-목표 파일에 없는 장부 종목은 매매수량 0 으로 남긴다(건드리지 않음). 장부에도 목표에도 없는 계좌 보유 종목은 다루지 않는다.
+목표 파일에서 빠진 장부 종목은 "목표 제외 → 전량 매도"(목표수량 0, 매도 시분할). 장부에 없는 계좌 보유 종목(직접 산 종목)은 다루지 않는다.
 """
 from __future__ import annotations
 
@@ -123,7 +124,7 @@ def build_rows(targets: list[dict], ledger: dict[str, dict], account_qty: dict[s
         acct = int(account_qty.get(sym, 0))
         price = float(q.get("price") or 0)
         row = {
-            "symbol": sym, "name": t.get("name") or q.get("name") or led.get("name") or "", "in_portfolio": True,
+            "symbol": sym, "name": t.get("name") or q.get("name") or led.get("name") or "", "in_portfolio": True, "excluded": False,
             "weight": float(t["weight"]), "atr": a.get("atr"), "atr_source": a.get("source", "none"),
             "atr_as_of": a.get("as_of"), "atr_error": a.get("error", ""), "price": price or None,
             "open": float(q.get("open") or 0) or None,
@@ -167,22 +168,31 @@ def build_rows(targets: list[dict], ledger: dict[str, dict], account_qty: dict[s
             "price": float(q.get("price") or 0) or None, "open": None,
             "ledger_qty": int(led["quantity"]), "ledger_avg_price": float(led.get("avg_price") or 0) or None,
             "account_qty": int(account_qty.get(sym, 0)), "sellable_qty": min(int(led["quantity"]), int(account_qty.get(sym, 0))),
-            "target_qty": int(led["quantity"]), "trade_qty": 0, "amount": 0.0, "rounds": 0,
+            "target_qty": 0, "trade_qty": 0, "amount": 0.0, "rounds": 0, "excluded": True,
             "stop_price": None, "stop_basis": "", "band_low": None, "band_high": None,
-            "note": "목표 파일에 없는 장부 종목 — 건드리지 않음(직접 매도)",
+            "note": "목표 제외 → 전량 매도",
         })
+        row = rows[-1]
+        price = row["price"] or 0
+        trade = -row["sellable_qty"]
+        if row["sellable_qty"] < row["ledger_qty"]:
+            row["note"] += f" (매도 가능 {row['sellable_qty']}주 — 계좌 보유 {row['account_qty']}주)"
+        if price <= 0:
+            row["note"] += " · 현재가 조회 실패 — 회차마다 다시 확인"
+        row.update(trade_qty=trade, amount=round(trade * price, 2), rounds=rounds_for(trade, "SELL") if trade else 0)
+        sp, basis = stop_price(row["ledger_avg_price"] or 0, row["atr"], stop_atr_mult, stop_loss_pct)
+        row.update(stop_price=round(sp, 2) if sp else None, stop_basis=basis)
     rows.sort(key=lambda r: (r["trade_qty"], r["symbol"]))   # 참고 구현처럼 매도(음수) 먼저
     return rows, warnings
 
 
 def ledger_eval_for(targets: list[dict], ledger: dict[str, dict], quotes: dict[str, dict]) -> float:
-    """목표 종목의 장부 평가액(현재가 없으면 평균가로 평가)."""
+    """장부 전체 평가액(현재가 없으면 평균가로 평가). 목표에서 빠진 장부 종목도 그날 매도해 현금이 되므로 포함한다."""
     total = 0.0
-    for t in targets:
-        led = ledger.get(t["symbol"]) or {}
+    for sym, led in ledger.items():
         qty = int(led.get("quantity") or 0)
         if qty:
-            price = float((quotes.get(t["symbol"]) or {}).get("price") or 0) or float(led.get("avg_price") or 0)
+            price = float((quotes.get(sym) or {}).get("price") or 0) or float(led.get("avg_price") or 0)
             total += qty * price
     return total
 
@@ -204,7 +214,7 @@ PLAN_CSV_COLUMNS = [
     ("예상금액", "amount"),
     ("ATR출처", "atr_source"), ("ATR기준일", "atr_as_of"), ("계좌보유수량", "account_qty"), ("장부평균가", "ledger_avg_price"),
     ("손절가", "stop_price"), ("손절기준", "stop_basis"), ("시가", "open"), ("매수범위하단", "band_low"), ("매수범위상단", "band_high"),
-    ("회차수", "rounds"), ("포트폴리오포함", "in_portfolio"), ("비고", "note"),
+    ("회차수", "rounds"), ("포트폴리오포함", "in_portfolio"), ("목표제외", "excluded"), ("비고", "note"),
 ]
 
 

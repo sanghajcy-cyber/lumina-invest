@@ -70,7 +70,6 @@ def test_evaluate_stop_atr_and_percent():
 
 def test_stop_cancels_both_rebalance_sides_then_market_sells_ledger_qty(env):
     e = env([], {}, balance=bal(s005930=(8, 95_000)))
-    e.repo.targets = {"005930"}
     pos(e, "005930", 10, 100_000, atr=2_000)                       # 계좌 8주(2주는 수동 매도했다고 가정)
     buy, sell = open_order(e, "005930", "BUY"), open_order(e, "005930", "SELL")
     out = watch(e)
@@ -92,7 +91,6 @@ def test_stop_cancels_both_rebalance_sides_then_market_sells_ledger_qty(env):
 
 def test_stop_waits_when_rebalance_cancel_not_confirmed_then_continues(env):
     e = env([], {}, balance=bal(s005930=(10, 85_000)))
-    e.repo.targets = {"005930"}
     pos(e, "005930", 10, 100_000)
     buy = open_order(e, "005930", "BUY")
     e.fb.cancel_sticks.add(buy.order_no)
@@ -107,7 +105,6 @@ def test_stop_waits_when_rebalance_cancel_not_confirmed_then_continues(env):
 
 def test_no_new_stop_while_stop_order_open_or_unconfirmed_and_fill_goes_to_ledger(env):
     e = env([], {}, balance=bal(s005930=(10, 85_000)))
-    e.repo.targets = {"005930"}
     pos(e, "005930", 10, 100_000)
     watch(e)
     watch(e, at(10, 1))
@@ -122,7 +119,6 @@ def test_no_new_stop_while_stop_order_open_or_unconfirmed_and_fill_goes_to_ledge
 
 def test_failed_stop_retries_until_limit_then_notifies(env):
     e = env([], {}, balance=bal(s005930=(10, 85_000)))
-    e.repo.targets = {"005930"}
     pos(e, "005930", 10, 100_000)
     with patch("app.services.notification.notify_order_error", AsyncMock()) as notify:
         for i in range(5):
@@ -137,22 +133,25 @@ def test_stop_ignores_risk_limits_and_strategy_order_limit(env):
     broker = SimpleNamespace(risk_kill_switch=False, risk_halt_reason="", risk_daily_loss_limit_pct=1.0, risk_max_position_pct=30.0,
                              risk_max_orders_per_day=0, risk_cooldown_min=30)
     e = env([], {}, plan=_plan(max_orders_per_day=0), broker_row=broker, balance=bal(s005930=(5, 80_000)))
-    e.repo.targets = {"005930"}
     pos(e, "005930", 5, 100_000)
     run(risk_guard.day_start_equity(f"{UID}:live:paper", 200_000_000))           # 일손실 −50%
     watch(e)
     assert e.fb.placed and e.fb.placed[-1][1] == "SELL"
 
 
-def test_stop_only_for_target_symbols_and_kill_switch(env):
-    e = env([], {}, balance=bal(s005930=(5, 10_000), s000660=(5, 10_000)))
-    e.repo.targets = {"005930"}
-    pos(e, "005930", 5, 100_000)
-    pos(e, "000660", 5, 100_000)                                                   # 목표 파일에서 빠진 장부 종목
-    watch(e)
-    assert [p[0] for p in e.fb.placed] == ["005930"]
+def test_stop_covers_all_ledger_symbols_but_not_account_only_and_kill_switch(env):
+    e = env([], {}, balance=bal(s005930=(5, 10_000), s000660=(5, 10_000), s035720=(9, 10)))
+    pos(e, "005930", 5, 100_000)                                                   # 목표 종목
+    pos(e, "000660", 5, 100_000)                                                   # 목표에서 빠져 매도 중인 장부 종목 → 감시 계속
+    watch(e)                                                                       # 035720: 장부에 없는 직접 산 종목 → 손대지 않음
+    assert sorted(p[0] for p in e.fb.placed) == ["000660", "005930"]
+    sold = next(o for o in e.repo.orders if o.symbol == "000660")
+    sold.status, sold.filled_quantity = "FILLED", 5
+    e.fb.balance = bal(s005930=(5, 10_000), s035720=(9, 10))
+    n = len(e.fb.placed)
+    watch(e, at(10, 1))
+    assert next(p for p in e.repo.positions_ if p.symbol == "000660").quantity == 0 and len(e.fb.placed) == n   # 다 팔면 감시 끝
     e2 = env([], {}, broker_row=SimpleNamespace(risk_kill_switch=True, risk_halt_reason="x"), balance=bal(s005930=(5, 10_000)))
-    e2.repo.targets = {"005930"}
     pos(e2, "005930", 5, 100_000)
     assert watch(e2) == {"skipped": "kill_switch"} and e2.fb.placed == []
 
@@ -162,7 +161,6 @@ def test_stop_only_for_target_symbols_and_kill_switch(env):
 
 def test_ledger_sync_clamps_to_account_but_not_while_sell_open(env):
     e = env([], {}, balance=bal(s005930=(3, 100_000), s000660=(0, 0)))
-    e.repo.targets = {"005930", "000660"}
     a = pos(e, "005930", 10, 100_000)
     b = pos(e, "000660", 4, 50_000)
     open_order(e, "005930", "SELL")                                                 # 매도 체결 확인 전 → 건너뜀
@@ -175,7 +173,6 @@ def test_ledger_sync_clamps_to_account_but_not_while_sell_open(env):
 
 def test_late_fill_from_previous_day_is_applied(env):
     e = env([], {}, balance=bal(s005930=(5, 100_000)))
-    e.repo.targets = {"005930"}
     old = SimpleNamespace(id=uuid.uuid4())
     lo = open_order(e, "005930", "BUY", qty=5, status="FILLED")
     lo.filled_quantity, lo.avg_filled_price = 5, 99_000.0
@@ -227,7 +224,6 @@ def test_rebalance_stop_cancels_open_buy_and_sell_but_not_stop_orders_and_watch_
     e = env([_row("005930", 20, 10_000), _row("000660", 0, 10_000)],
             {"005930": {"price": 10_000, "open": 10_000}, "000660": {"price": 10_000, "open": 10_000}},
             balance=bal(s000660=(10, 10_000), s035720=(5, 1_000)))
-    e.repo.targets = {"005930", "000660", "035720"}
     r = _start(e)
     pos(e, "000660", 10, 10_000)
     pos(e, "035720", 5, 10_000)                                                       # 손절 대상
@@ -255,7 +251,6 @@ def test_rebalance_stop_cancels_open_buy_and_sell_but_not_stop_orders_and_watch_
 
 def test_stop_loss_watch_gate_window_and_schedule(env, monkeypatch):
     e = env([], {}, balance=bal(s005930=(5, 10_000)))
-    e.repo.targets = {"005930"}
     pos(e, "005930", 5, 100_000)
 
     class Session:
@@ -282,7 +277,6 @@ def test_stop_loss_watch_gate_window_and_schedule(env, monkeypatch):
 
 def test_restart_resolves_planned_stop_event(env):
     e = env([], {}, balance=bal(s005930=(5, 10_000)))
-    e.repo.targets = {"005930"}
     pos(e, "005930", 5, 100_000)
     a = StrategyStopEvent(plan_id=e.plan.id, user_id=UID, trade_date=DAY, symbol="005930", name="", seq=0, status="planned",
                           client_order_id="cid-missing", quantity=5, filled_qty=0, trigger_price=10_000, reason="")

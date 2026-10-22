@@ -155,18 +155,37 @@ def test_rows_reproduce_reference_plan_csv():
     assert list(got.columns) == list(want.columns)
 
 
-def test_rows_sell_capped_by_ledger_and_account_and_ledger_only_symbol_untouched():
+def test_rows_sell_capped_by_ledger_and_account_and_excluded_ledger_symbol_full_sell():
     targets = [{"symbol": "005930", "name": "삼성전자", "weight": 0.1}]
-    ledger = {"005930": {"quantity": 50, "avg_price": 70_000}, "000660": {"quantity": 3, "avg_price": 100_000, "name": "하이닉스"}}
-    rows, _ = _build(targets, ledger=ledger, account={"005930": 20, "000660": 3},
+    ledger = {"005930": {"quantity": 50, "avg_price": 70_000},
+              "000660": {"quantity": 3, "avg_price": 100_000, "name": "하이닉스", "atr": 4_000.0, "atr_source": "kis"}}
+    rows, _ = _build(targets, ledger=ledger, account={"005930": 20, "000660": 3, "035720": 9},     # 035720: 장부에 없는 직접 산 종목
                      quotes={"005930": {"price": 70_000}, "000660": {"price": 120_000}},
                      atrs={"005930": {"atr": 1_500.0, "source": "kis", "as_of": "2026-10-30"}}, budget=1_400_000)
     sam = next(r for r in rows if r["symbol"] == "005930")
     assert sam["target_qty"] == 2 and sam["sellable_qty"] == 20 and sam["trade_qty"] == -20   # 48주 팔아야 하지만 계좌엔 20주
-    assert sam["stop_price"] == 70_000 - 2 * 1_500 and sam["stop_basis"] == "평균가 − ATR×2"
+    assert sam["stop_price"] == 70_000 - 2 * 1_500 and sam["stop_basis"] == "평균가 − ATR×2" and sam["excluded"] is False
     hy = next(r for r in rows if r["symbol"] == "000660")
-    assert hy["in_portfolio"] is False and hy["trade_qty"] == 0 and "건드리지 않음" in hy["note"]
-    assert rows[0]["symbol"] == "005930"                                                   # 매도 먼저
+    assert (hy["in_portfolio"], hy["excluded"], hy["target_qty"], hy["trade_qty"], hy["amount"], hy["rounds"]) == (False, True, 0, -3, -360_000, 3)
+    assert hy["note"] == "목표 제외 → 전량 매도" and hy["stop_price"] == 100_000 - 2 * 4_000      # 매도 끝날 때까지 손절 기준
+    assert "035720" not in {r["symbol"] for r in rows}                                         # 장부에 없는 종목은 다루지 않는다
+    assert rows[0]["symbol"] == "005930"                                                       # 매도 먼저(큰 매도부터)
+
+
+def test_excluded_row_capped_by_account_and_csv_marks_it():
+    rows, _ = _build([], ledger={"000660": {"quantity": 5, "avg_price": 100_000, "name": "하이닉스"}}, account={"000660": 2},
+                     quotes={"000660": {"price": 90_000}})
+    assert rows[0]["trade_qty"] == -2 and "매도 가능 2주" in rows[0]["note"]
+    csv_text = planner.to_plan_csv(rows).lstrip("\ufeff")
+    df = pd.read_csv(io.StringIO(csv_text), dtype=str)
+    assert df.loc[0, "목표수량"] == "0" and df.loc[0, "매매수량"] == "-2" and df.loc[0, "목표제외"] == "Y"
+    assert df.loc[0, "비고"].startswith("목표 제외 → 전량 매도") and df.loc[0, "포트폴리오포함"] == "N"
+
+
+def test_ledger_eval_includes_excluded_symbols_for_budget_cap():
+    targets = [{"symbol": "005930"}]
+    ledger = {"005930": {"quantity": 1, "avg_price": 100}, "000660": {"quantity": 2, "avg_price": 50}}
+    assert planner.ledger_eval_for(targets, ledger, {"005930": {"price": 110}}) == 110 + 2 * 50   # 현재가 없으면 평균가
 
 
 def test_rows_percent_stop_band_missing_price_and_order_cap_warning():
@@ -318,6 +337,21 @@ def _activate(db, plan, targets=True, **kw):
          patch.object(svc, "force_off_live_kis_auto_trade", AsyncMock(return_value=["u1"])) as force:
         out = asyncio.run(svc.set_active(db, UID, True, **kw))
     return out, force
+
+
+def test_deactivate_live_plan_warns_about_unwatched_ledger_and_open_orders():
+    plan = _plan(is_active=True, dry_run=False)
+    open_orders = [object(), object()]
+    with patch.object(svc, "get_plan", AsyncMock(return_value=plan)), \
+         patch.object(svc, "load_ledger", AsyncMock(return_value={"005930": {"quantity": 3, "name": "삼성전자"}})), \
+         patch.object(svc, "audit", AsyncMock()):
+        out = asyncio.run(svc.set_active(FakeDb([One(open_orders)]), UID, False))
+    assert plan.is_active is False and len(out["warnings"]) == 2
+    assert "손절 감시 없이 남습니다" in out["warnings"][0] and "005930 삼성전자 3주" in out["warnings"][0]
+    assert "열린 전략 주문 2건" in out["warnings"][1]
+    plan2 = _plan(is_active=True, dry_run=True)                                       # dry-run 플랜은 실제 주문이 없으니 경고 없음
+    with patch.object(svc, "get_plan", AsyncMock(return_value=plan2)), patch.object(svc, "audit", AsyncMock()):
+        assert asyncio.run(svc.set_active(FakeDb(), UID, False))["warnings"] == []
 
 
 def test_activate_dry_run_does_not_touch_auto_trade():
