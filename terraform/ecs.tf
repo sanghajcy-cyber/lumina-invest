@@ -102,7 +102,7 @@ resource "aws_ecs_task_definition" "worker" {
     name      = "worker"
     image     = "${var.account_id}.dkr.ecr.${var.region}.amazonaws.com/lumina-invest:latest"
     essential = true
-    command   = ["celery", "-A", "app.celery_app", "worker", "--loglevel=info", "--concurrency=2", "--queues=celery"]
+    command   = ["celery", "-A", "app.celery_app", "worker", "--loglevel=info", "--concurrency=2", "--queues=celery,trading"]
 
     secrets = [
       { name = "DATABASE_URL",    valueFrom = "${aws_secretsmanager_secret.app.arn}:DATABASE_URL::" },

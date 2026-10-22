@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import CashflowEvent, RebalancePlan, RebalanceRun
+from app.models import CashflowEvent, RebalancePlan, RebalanceRun, LIVE_ORDER_SOURCE_REBALANCE
 from app.models.rebalance import CASHFLOW_KINDS, TIME_PERIODS
 from app.services import paper_trading as pt
 from app.services.data_cache import cache_get, cache_set
@@ -516,7 +516,8 @@ async def execute(db: AsyncSession, user_id: uuid.UUID, plan: RebalancePlan, tri
             # KIS Testbed 실주문(게이트웨이). 체결은 비동기(quant.confirm_fills) → 여기서는 submitted/skipped/failed 만 기록
             from app.services import auto_trade
             res = await auto_trade._place_live_order_via_gateway(db, None, o["symbol"], o["name"], o["side"].lower(),
-                                                                 int(o["quantity"]), float(o["price"]), str(user_id))
+                                                                 int(o["quantity"]), float(o["price"]), str(user_id),
+                                                                 source=LIVE_ORDER_SOURCE_REBALANCE)
             st = res.get("status")
             rec.update({"status": "submitted" if st == "submitted" else ("skipped" if st == "skipped" else "failed"),
                         "live_order": {k: res.get(k) for k in ("status", "order_no", "client_order_id", "reason", "error", "environment") if res.get(k) is not None}})

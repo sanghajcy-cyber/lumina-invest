@@ -3,6 +3,8 @@
 beat 가 60초마다 ``beat.heartbeat`` 를 보내고 worker 가 실행하면 Redis 키 ``celery:beat:heartbeat`` 에 UTC 시각이 적힌다.
 키가 ``MAX_AGE_SEC`` 보다 오래됐으면 beat 가 보내지 않거나 worker 가 받지 않는 것이다.
 ``python -m app.tasks.beat_health`` 는 Docker healthcheck 용 CLI: 정상 0, 비정상 1.
+큐별 워커는 ``--queue trading`` 처럼 큐 이름을 주면 그 큐로 라우팅된 heartbeat 키(``celery:beat:heartbeat:trading``)를 본다 —
+공용 키만 보면 다른 큐의 워커가 살아 있는 동안 이 워커가 죽어도 healthy 로 보인다.
 2026-10-06 운영에서 beat 가 첫 사이클 뒤 30분 이상 due task 를 보내지 않은 사고(수동 restart 로 복구) 뒤 추가.
 """
 from __future__ import annotations
@@ -20,19 +22,23 @@ def _redis_url() -> str:
     return settings.REDIS_URL
 
 
-def write_heartbeat(now: datetime | None = None) -> str:
+def heartbeat_key(queue: str = "") -> str:
+    return f"{HEARTBEAT_KEY}:{queue}" if queue else HEARTBEAT_KEY
+
+
+def write_heartbeat(now: datetime | None = None, queue: str = "") -> str:
     import redis
     stamp = (now or datetime.now(timezone.utc)).isoformat()
     r = redis.Redis.from_url(_redis_url(), socket_timeout=5)
-    r.set(HEARTBEAT_KEY, stamp, ex=MAX_AGE_SEC * 4)
+    r.set(heartbeat_key(queue), stamp, ex=MAX_AGE_SEC * 4)
     return stamp
 
 
-def heartbeat_age_sec(now: datetime | None = None) -> float | None:
+def heartbeat_age_sec(now: datetime | None = None, queue: str = "") -> float | None:
     """마지막 heartbeat 이후 경과 초. 키가 없으면 None."""
     import redis
     r = redis.Redis.from_url(_redis_url(), socket_timeout=5)
-    raw = r.get(HEARTBEAT_KEY)
+    raw = r.get(heartbeat_key(queue))
     if not raw:
         return None
     last = datetime.fromisoformat(raw.decode() if isinstance(raw, bytes) else raw)
@@ -60,12 +66,20 @@ def _uptime_sec() -> float:
         return GRACE_SEC + 1   # 알 수 없으면 유예 없이 판정
 
 
-def main() -> int:
+def _queue_arg(argv: list[str]) -> str:
+    if "--queue" in argv:
+        i = argv.index("--queue")
+        return argv[i + 1] if i + 1 < len(argv) else ""
+    return ""
+
+
+def main(argv: list[str] | None = None) -> int:
+    queue = _queue_arg(list(sys.argv[1:] if argv is None else argv))
     try:
-        ok, msg = check(heartbeat_age_sec(), _uptime_sec())
+        ok, msg = check(heartbeat_age_sec(queue=queue), _uptime_sec())
     except Exception as exc:
         ok, msg = False, f"redis 조회 실패: {exc}"
-    print(("OK " if ok else "UNHEALTHY ") + msg)
+    print(("OK " if ok else "UNHEALTHY ") + (f"[{queue}] " if queue else "") + msg)
     return 0 if ok else 1
 
 

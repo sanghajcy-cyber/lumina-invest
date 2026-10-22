@@ -149,7 +149,7 @@ lumina_osaka:
           - worker
           - --loglevel=info
           - --concurrency=2
-          - --queues=celery
+          - --queues=celery,trading  # 단일 워커가 기본·trading 큐를 함께 처리 (app/celery_app.py task_routes)
         secret_keys:
           - DATABASE_URL
           - REDIS_URL

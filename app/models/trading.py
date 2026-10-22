@@ -103,6 +103,12 @@ class CustomIndicator(Base, UUIDPkMixin, CreatedAtMixin):
 
 LIVE_ORDER_OPEN_STATUSES = ("PENDING", "ACCEPTED", "PARTIALLY_FILLED", "CANCEL_REQUESTED", "UNKNOWN")
 LIVE_ORDER_TERMINAL_STATUSES = ("FILLED", "CANCELLED", "REJECTED", "ERROR")
+# live_orders.source: 같은 KIS 계좌에 주문을 내는 주체. 정합성 점검·전략 장부가 자기 주문만 골라 집계할 때 쓴다.
+LIVE_ORDER_SOURCE_QUANT_AUTO = "QUANT_AUTO"   # auto_trade 주기 사이클
+LIVE_ORDER_SOURCE_REBALANCE = "REBALANCE"     # rebalance 엔진(account_source=kis)
+LIVE_ORDER_SOURCE_MANUAL = "MANUAL"           # 화면에서 낸 수동 주문
+LIVE_ORDER_SOURCE_ATR_REBAL = "ATR_REBAL"     # 월초 ATR 리밸런싱 전략(시분할·손절)
+LIVE_ORDER_SOURCES = (LIVE_ORDER_SOURCE_QUANT_AUTO, LIVE_ORDER_SOURCE_REBALANCE, LIVE_ORDER_SOURCE_MANUAL, LIVE_ORDER_SOURCE_ATR_REBAL)
 
 
 class LiveOrder(Base, UUIDPkMixin, CreatedAtMixin, UpdatedAtMixin):
@@ -117,6 +123,7 @@ class LiveOrder(Base, UUIDPkMixin, CreatedAtMixin, UpdatedAtMixin):
     __table_args__ = (
         UniqueConstraint("client_order_id", name="uq_live_orders_client_order_id"),
         Index("ix_live_orders_user_status", "user_id", "status"),
+        Index("ix_live_orders_source_status", "source", "status"),
     )
 
     user_id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
@@ -135,3 +142,4 @@ class LiveOrder(Base, UUIDPkMixin, CreatedAtMixin, UpdatedAtMixin):
     avg_filled_price: Mapped[float] = mapped_column(Float, nullable=False, default=0)
     message: Mapped[str] = mapped_column(String(300), nullable=False, default="")
     raw: Mapped[str] = mapped_column(Text, nullable=False, default="")                    # 마지막 게이트웨이 응답 JSON
+    source: Mapped[str] = mapped_column(String(20), nullable=False, default=LIVE_ORDER_SOURCE_QUANT_AUTO)  # LIVE_ORDER_SOURCES

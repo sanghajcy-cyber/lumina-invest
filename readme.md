@@ -384,6 +384,8 @@ docker compose run --rm ingest
 
 자동매매는 인프로세스 루프가 아니라 **DB 플래그(`broker_settings.quant_auto_enabled`) + Celery Beat 10분 태스크(`quant.auto_trade_cycle`)**로 실행되므로 `celery-beat`, `celery-worker` 컨테이너가 반드시 떠 있어야 합니다. 사이클 로그는 `data_cache`에 공유 저장됩니다.
 
+주문·계좌 태스크(`quant.auto_trade_cycle`·`quant.confirm_fills`·`quant.reconcile`·`rebalance.check_triggers`·`strategy.*`)는 `trading` 큐로 라우팅되어(`app/celery_app.py` `task_routes`) **`celery-worker-trading` 컨테이너**가 처리합니다. docker compose 로 서비스를 골라 재기동할 때는 `app celery-worker celery-worker-trading celery-beat` 를 함께 지정하세요 — 빠뜨리면 자동매매·체결 확인이 큐에 쌓이기만 합니다. AWS(ECS·Ansible)는 단일 워커가 `--queues=celery,trading` 으로 두 큐를 함께 받습니다.
+
 Ansible 실제 시크릿(`aws-work/ansible/inventories/*/group_vars/secrets.yml`)은 더 이상 커밋되지 않습니다(`secrets.sample.yml` 참고). 이전에 커밋된 값은 모두 교체하세요.
 
 ## 모의투자 · Open API (stock-coin-trade 이식)

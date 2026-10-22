@@ -7,6 +7,17 @@ Beat  실행: celery -A app.celery_app beat  --loglevel=info
 from celery import Celery
 from app.config import settings
 
+# 주문을 내거나 계좌 상태를 바꾸는 태스크는 trading 큐로 보내 전용 워커(celery-worker-trading)가 처리한다.
+# 기본 큐(celery)의 LLM·인제스트 태스크가 길게 돌아도 자동매매·체결 확인·손절 감시가 밀리지 않게 하려는 것.
+TRADING_QUEUE = "trading"
+TRADING_TASKS = (
+    "quant.auto_trade_cycle",
+    "quant.confirm_fills",
+    "quant.reconcile",
+    "rebalance.check_triggers",
+    "beat.heartbeat_trading",
+)
+
 celery_app = Celery(
     "lumina-invest",
     # autodiscover_tasks(["app.tasks"])는 app.tasks.tasks 모듈을 찾기 때문에 실제로는 아무 태스크도
@@ -35,6 +46,10 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,  # LLM 태스크가 무거우므로 1:1 처리
     result_expires=3600,           # 결과 1시간 보관
 
+    # ── 큐 라우팅 ───────────────────────────────────────────────────────────────
+    # strategy.* 는 월초 ATR 리밸런싱 전략(시분할·손절) 태스크 자리.
+    task_routes={**{name: {"queue": TRADING_QUEUE} for name in TRADING_TASKS}, "strategy.*": {"queue": TRADING_QUEUE}},
+
     # ── Celery Beat 주기 스케줄 ────────────────────────────────────────────────
     beat_schedule={
         "sync-market-data-hourly": {
@@ -55,6 +70,11 @@ celery_app.conf.update(
         "beat-heartbeat-1min": {
             "task": "beat.heartbeat",
             "schedule": 60.0,             # 1분 — beat/worker 생존 신호 (healthcheck → autoheal 재시작)
+            "options": {"expires": 50},
+        },
+        "beat-heartbeat-trading-1min": {
+            "task": "beat.heartbeat_trading",
+            "schedule": 60.0,             # 1분 — trading 큐 워커 생존 신호 (celery-worker-trading healthcheck)
             "options": {"expires": 50},
         },
         "quant-auto-trade-cycle": {
