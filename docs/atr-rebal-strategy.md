@@ -115,3 +115,27 @@ reconcile(10분) ≈ 2 → 합계 ≈ 49 < 60. 6종목이면 59 로 여유가 �
 6. AWS(ECS·Ansible) 워커를 trading 전용으로 분리 — 지금은 단일 워커가 `--queues=celery,trading`.
 7. `_place_live_order_via_gateway` 가 같은 clientOrderId 로 다시 불리면 `live_orders` UNIQUE 위반 — 태그 없이 같은 분에 같은 종목·방향을 두 번 내는 호출자 점검.
 8. 409·429 로 실패한 시도마다 `live_orders` 에 ERROR 행이 남고 `notify_order_error` 알림이 간다(손절 재시도 시 알림이 여러 번). 일시 오류는 알림을 묶는 것을 검토.
+
+## 진행 상황 (2026-10-22)
+
+**완료**
+- 1~5단계 코드: st 확인 → 기반(Wilder ATR·거래일·trading 큐·`live_orders.source`) → 계획·dry-run → 시분할 실행 → 손절·장부 동기화.
+  보완: 목표 제외 장부 종목 전량 매도, `/deactivate` 경고, 손절 409·429 재시도, tick 당 4종목(호출 예산). pytest 465 통과.
+- 로컬 검증: 마이그레이션 0017~0020 적용·`q0016_merge` 왕복, trading 워커 헬스체크, 큐 라우팅, 로그 에러 없음.
+- st 연동(로컬): MariaDB·quant Postgres 백업(`~/backups/stock-coin-trade/`) → st `origin/main`(7d864c6) 재빌드
+  (`kis_autotrade_order`·`kis_order_approval`·`api_key.scopes` 추가) → `crypto-mock-python` shared-net 연결 →
+  KIS 모의 자격증명 입력 → API 키 발급(라벨 `lumina-autotrade-paper`, `scopes=kis:order`) →
+  lumina `.env` `STOCK_COIN_TRADE_BASE_URL=http://crypto-mock-python:8200`, `KIS_ENVIRONMENT=paper` → 게이트웨이 잔고 200.
+- 실제 계좌 dry-run(you1@example.com, 투자금액 1,000만, 참고 구현 portfolio.csv 5종목): 목표수량 1/6/9/11/12주로 참고 구현과 같음.
+  ATR 5종목 모두 KIS 일봉(오늘 봉 제외, 기준일 10-21)으로 계산, 독립 계산과 일치. 매수 계획 39주 ≈ 887만 원.
+  삼성전자는 계좌 기존 10주가 장부 밖이라 9주 신규 매수(참고 구현은 −1주). 주문 0건.
+- 브랜치 `feat/atr-rebal-step5-stoploss`(2~5단계 포함). `LIVE_EXECUTION_AVAILABLE = False`.
+
+**다음 할 일**
+1. LIVE 승인 커밋: `service.LIVE_EXECUTION_AVAILABLE = True` (활성화 거부 문구도 "승인 전"으로 정리).
+2. 첫 모의 운영: 1~2종목·소액으로 `/activate {"dry_run": false}` → `POST /rebalance/start` → `GET /rebalance/today` 로 회차 관찰.
+3. 모의 운영 확인 후 이 브랜치 하나로 main PR (로컬 main 의 미푸시 커밋 10개 포함 여부 정리).
+
+**미결정**
+- 화면 시세 소스: `MARKET_DATA_SOURCE=kis` 이면 화면 시세가 st 의 KIS 호출 줄(1.05초 직렬)을 주문·손절과 공유해 지연될 수 있다.
+  `/api/kis-chart` 는 API 키 한도(분당 60회) 밖이라 429 는 아니다. 선택지: 화면만 `yahoo` / st 에 시세용 KIS 앱키 분리.
