@@ -40,7 +40,15 @@ logger = logging.getLogger(__name__)
 KST = planner.KST
 REBAL_TAG = "ATR"                 # clientOrderId 태그 ATR{attempt}
 STOP_TAG = "SL"                   # 손절 주문 태그 — 리밸런싱 취소·일괄 취소·중지 대상이 아니다
-MAX_SYMBOLS_PER_TICK = 6          # 종목당 호출 ≈ 시세 1 + 상태·취소 0~3 + 주문 2 → tick 당 ≤ 36회
+# tick 당 처리 종목 수. 게이트웨이 Open API 한도는 API 키당 분당 60회이고 이 키를 다른 태스크와 같이 쓴다.
+#   종목 1개(최악): 이전 주문 상태 1 + 취소 1 + 재조회 1 + 승인(order-approval) 1 + 주문 1 = 5회  (시세는 /api/kis-chart 라 한도 밖)
+#   리밸런싱 tick = 잔고 1 + 4종목 × 5 = 21회
+#   같은 분의 다른 호출(최악): 손절 감시 잔고 1 + 손절 1건(취소 3 + 승인·주문 2) ≈ 6,
+#                              confirm_fills(2분) 열린 주문 1건당 1 — 20종목이면 ≤ 20, reconcile(10분) ≈ 2
+#   합계 ≈ 21 + 6 + 20 + 2 = 49 < 60.  6종목이면 31 + 28 = 59 로 여유가 없어 4로 둔다.
+#   st 는 KIS 호출을 1.05초 간격으로 직렬화하므로 종목당 KIS 6~8회 ≈ 8초 → 4종목 ≈ 32초 < tick time_limit 55초.
+#   20종목이면 한 회차(5분)를 5 tick 에 나눠 처리한다(매도 먼저).
+MAX_SYMBOLS_PER_TICK = 4
 FINALIZE_AT = time(15, 20)
 LOCK_TTL_SEC = 55
 SYMBOL_LOCK_TTL_SEC = 50          # 리밸런싱 tick 과 손절 감시가 같은 종목을 동시에 건드리지 않게
