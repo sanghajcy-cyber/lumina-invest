@@ -325,6 +325,41 @@ def test_avg_sync_skipped_while_order_or_fill_pending_and_mixed_resets_at_zero(e
     assert p.account_mixed is False                                   # 계좌·장부 모두 0 → KIS 평균가 초기화 → 표시 해제
 
 
+def test_mixed_survives_manual_sell_and_next_rebalance_plan(env):
+    """14주(직접 산 10주 + 전략 4주, 섞임) → HTS 10주 매도 → 11/2 리밸런싱 계획(계좌 4 = 장부 4) → 섞임·평균가 207,000 유지."""
+    e = env([_row("005930", 4, 210_000, account_qty=4, ledger_qty=4)], {"005930": {"price": 210_000, "open": 210_000}},
+            balance=bal(s005930=(14, 210_000, 219_745)))
+    p = pos(e, "005930", 4, 207_000)
+    run(sl.watch_plan(e.repo, e.plan, at(10, 0, day=date(2026, 10, 26))))         # 계좌 14 > 장부 4 → 섞임
+    assert p.account_mixed is True
+    e.fb.balance = bal(s005930=(4, 210_000, 219_745))                               # HTS 10주 매도(KIS 평균가는 평균법이라 그대로)
+    run(sl.watch_plan(e.repo, e.plan, at(10, 1, day=date(2026, 10, 26))))
+    assert (p.quantity, p.avg_price, p.account_mixed) == (4, 207_000, True)
+    r = run(ex.start_rebalance(e.repo.db, UID, manual=False, now=at(9, 5), repo=e.repo))   # 11/2 첫 거래일 자동 시작
+    assert r.trigger == "auto" and r.rows[0]["account_qty"] == r.rows[0]["ledger_qty"] == 4
+    assert p.account_mixed is True                                                  # 계획 시점 계좌 = 장부여도 false 로 안 돌아간다
+    out = run(sl.watch_plan(e.repo, e.plan, at(9, 6)))                              # 계획 뒤 첫 감시
+    assert (p.quantity, p.avg_price, p.account_mixed) == (4, 207_000, True) and out["avg_sync"] == []
+
+
+def test_mixed_clears_only_when_account_reaches_zero_then_fresh_buy_syncs(env):
+    e = env([], {}, balance=bal(s005930=(4, 210_000, 219_745)))
+    p = pos(e, "005930", 4, 207_000, mixed=True)
+    run(sl.watch_plan(e.repo, e.plan, at(10, 0)))
+    assert p.account_mixed is True and p.avg_price == 207_000
+    p.quantity, p.avg_price = 0, 0.0                                               # 전략이 4주를 다 팔았지만
+    e.fb.balance = bal(s005930=(3, 210_000, 219_745))                               # 계좌에 아직 3주가 있다(직접 산 몫)
+    run(sl.watch_plan(e.repo, e.plan, at(10, 1)))
+    assert p.account_mixed is True                                                  # 계좌 0 이 아니므로 유지
+    e.fb.balance = bal()                                                            # 계좌 0 → KIS 평균가 초기화
+    run(sl.watch_plan(e.repo, e.plan, at(10, 2)))
+    assert p.account_mixed is False
+    p.quantity, p.avg_price = 2, 200_100.0                                          # 이후 전략이 새로 2주(지정가 기준)
+    e.fb.balance = bal(s005930=(2, 200_000, 200_000))
+    run(sl.watch_plan(e.repo, e.plan, at(10, 3)))
+    assert p.avg_price == 200_000                                                   # 전부 전략 몫 → KIS 평균가로 맞춘다
+
+
 def test_freeze_atr_marks_mixed_when_plan_saw_foreign_shares(env):
     e = env([_row("005930", 4, 200_000, account_qty=10, ledger_qty=0), _row("105560", 6, 150_000, account_qty=0, ledger_qty=0)],
             {"005930": {"price": 200_000, "open": 200_000}, "105560": {"price": 150_000, "open": 150_000}})
