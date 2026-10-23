@@ -103,7 +103,8 @@ celery_app.conf.update(
         "strategy-stop-loss-watch": {
             "task": "strategy.stop_loss_watch",
             "schedule": crontab(minute="*", hour="9-15", day_of_week="mon-fri"),   # 09:05~15:15 는 태스크 안에서 거른다
-            "options": {"expires": 50},
+            # 매분 30초에 실행 — 정각의 리밸런싱 tick 과 원장 조회(잔고)가 같은 초에 몰려 EGW00215 가 나는 것을 피한다
+            "options": {"countdown": 30, "expires": 80},
         },
         "rebalance-check-hourly": {
             "task": "rebalance.check_triggers",

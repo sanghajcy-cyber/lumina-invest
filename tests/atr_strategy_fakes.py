@@ -44,11 +44,18 @@ class MemRepo:
     async def pending_slices(self, plan): return [s for s in self.slices_ if s.status == "submitted"]
     async def stop_events(self, plan, day=None): return [e for e in self.stops if day is None or e.trade_date == day]
     async def pending_stop_events(self, plan): return [e for e in self.stops if e.status in ("submitted", "planned")]
-    async def positions(self, plan): return list(self.positions_)
+    async def positions(self, plan, lock=False): return sorted(self.positions_, key=lambda p: p.symbol)
     async def open_rebalance_orders(self, uid, symbol=None):
         return [o for o in self.orders if o.status in ex.LIVE_ORDER_OPEN_STATUSES and ":ATR" in o.client_order_id
                 and (symbol is None or o.symbol == symbol)]
-    async def position(self, plan, symbol): return next((p for p in self.positions_ if p.symbol == symbol), None)
+    async def position(self, plan, symbol, lock=False): return next((p for p in self.positions_ if p.symbol == symbol), None)
+    async def claim_fill(self, row, old, new):
+        """DB 의 UPDATE … WHERE filled_qty = old 와 같은 비교 후 갱신."""
+        if int(row.filled_qty or 0) != old:
+            return False
+        row.filled_qty = new
+        return True
+    async def refresh(self, obj): pass
     async def ledger(self, plan):
         return {p.symbol: {"quantity": p.quantity, "avg_price": p.avg_price, "name": p.name} for p in self.positions_ if (p.quantity or 0) > 0}
     async def orders_placed_today(self, plan, day):
@@ -128,7 +135,9 @@ def _fields(rows):
 def env(monkeypatch):
     monkeypatch.setattr(svc, "LIVE_EXECUTION_AVAILABLE", True)
     monkeypatch.setattr(risk_guard, "_redis", lambda: None)
-    risk_guard._mem_keys.clear(); risk_guard._mem_values.clear(); ex._mem_lock.clear()
+    risk_guard._mem_keys.clear(); risk_guard._mem_values.clear(); ex._mem_lock.clear(); ex._balance_mem.clear()
+    # 잔고 공유 캐시는 실제 시계로 판정한다 — 가상 시각으로 분을 넘기는 테스트에서는 끈다(캐시는 별도 테스트)
+    monkeypatch.setattr(ex, "BALANCE_CACHE_SEC", 0)
 
     def make(rows, quotes, plan=None, broker_row=None, balance=None):
         plan = plan or _plan()
