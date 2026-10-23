@@ -459,8 +459,11 @@ async def _freeze_atr(repo: Repo, plan: StrategyPlan, rows: list[dict]) -> None:
             repo.add(pos)
         pos.atr = r.get("atr")
         pos.atr_source = r.get("atr_source") or "none"
+        # 계획 시점에 계좌에 전략 밖 보유분이 있었으면(예: 직접 산 삼성전자 10주) 섞임으로 표시한다.
+        # 여기서는 true 로만 바꾸고 false 로 되돌리지 않는다 — 섞였던 몫을 팔아 계좌 수량 = 장부 수량이 돼도 KIS 평균법 평균가에는
+        # 그 몫이 남아 있다. false 로 돌아가는 곳은 손절 감시(sync_avg_with_account)의 "계좌·장부 보유 모두 0" 뿐이다.
         if int(r.get("account_qty") or 0) > int(r.get("ledger_qty") or 0):
-            pos.account_mixed = True        # 계획 시점에 계좌에 전략 밖 보유분이 있었다(예: 직접 산 삼성전자 10주)
+            pos.account_mixed = True
         pos.atr_as_of = date.fromisoformat(r["atr_as_of"]) if r.get("atr_as_of") else None
 
 

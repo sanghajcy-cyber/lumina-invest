@@ -180,5 +180,20 @@ reconcile(10분) ≈ 2 → 합계 ≈ 49 < 60. 6종목이면 59 로 여유가 �
 - 11-02(월) 첫 거래일 자동 리밸런싱(회차 분산 적용 첫날) 관찰.
 - 브랜치 하나로 main PR(로컬 main 미푸시 커밋 10개 정리 포함).
 
+- `account_mixed` 유지 규칙 확인: 계획(`_freeze_atr`)은 true 로만 바꾸고, false 는 손절 감시의 "계좌·장부 보유 모두 0" 에서만.
+  시나리오 테스트(14주 섞임 → HTS 10주 매도 → 11/2 계획 → true·207,000 유지) 추가.
+
+**11/2(월) 첫 자동 리밸런싱에서 확인할 것**
+1. **Beat 자동 시작** — 09:10 tick 이 실행을 만든다(`trigger=auto`, 수동 시작 불필요). 09:10 전에 시작되지 않는다.
+   `select run_date, trigger, status, attempt, started_at at time zone 'Asia/Seoul' from strategy_runs where kind='rebalance' order by run_date desc limit 1`
+   목표가 이미 맞으면(삼성전자 4·KB금융 6, 같은 파일·투자금액) 주문이 없을 수 있다 — 그 경우 `summary.buy_qty = 0` 이고 tick 은 `idle`.
+2. **회차 분산** — `rows[].slots_BUY/SELL` 이 남은 시간에 고르게 잡히고, 주문(`strategy_slices`) 시각이 그 회차와 맞는다(연속 5분 간격이 아님).
+   `select to_char(created_at at time zone 'Asia/Seoul','HH24:MI') t, symbol, side, seq, quantity, status from strategy_slices where run_id = '<run id>' order by created_at`
+3. **평균가 동기화** — 매수 체결 뒤 손절 감시(매분 30초)가 KB금융처럼 전부 전략 몫인 종목만 KIS 매입평균가로 맞춘다(`ledger_avg_sync`),
+   삼성전자(`account_mixed=true`)는 바뀌지 않는다.
+   `select symbol, quantity, avg_price, account_mixed from strategy_positions order by symbol`
+4. 그 밖에: EGW00215 가 줄었는지(st `api_usage_log` 의 `result_summary like '원장%'`), 장부 동기화(`ledger_sync`) 경고가 없는지(이중 반영 재발 여부),
+   15:00 일괄 취소·15:20 `done`.
+
 **미결정**
 - 화면 시세 소스(10-22 와 같음). st 쪽 근본 해결(별도 작업 8~10)은 stock-coin-trade 저장소에서.
