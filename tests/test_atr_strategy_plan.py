@@ -362,7 +362,8 @@ def test_activate_dry_run_does_not_touch_auto_trade():
 
 
 def test_activate_live_refused_until_step4_then_forces_auto_trade_off(monkeypatch):
-    with pytest.raises(svc.StrategyError, match="dry-run 으로만"):
+    monkeypatch.setattr(svc, "LIVE_EXECUTION_AVAILABLE", False)
+    with pytest.raises(svc.StrategyError, match="승인되지 않았습니다"):
         _activate(FakeDb(), _plan(), dry_run=False)
     with pytest.raises(svc.StrategyError, match="비어 있어"):
         _activate(FakeDb(), _plan(), targets=False, dry_run=True)

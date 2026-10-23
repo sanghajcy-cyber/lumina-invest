@@ -1,7 +1,7 @@
 """월초 ATR 리밸런싱 전략 — DB·게이트웨이·KIS 시세를 묶는 진입점.
 
-3단계 범위: 플랜 설정, 목표 파일 업로드, ATR 계산, 계획 수립(dry-run), 활성화 규칙, 기존 auto_trade 차단.
-주문 실행(시분할·손절)은 4·5단계. 그 전까지 dry_run=False 로는 켤 수 없다(LIVE_EXECUTION_AVAILABLE).
+플랜 설정, 목표 파일 업로드, ATR 계산, 계획 수립(dry-run), 활성화 규칙, 기존 auto_trade 차단.
+주문 실행(시분할·손절)은 executor·stoploss. LIVE_EXECUTION_AVAILABLE 이 False 면 dry_run=False 로 켤 수 없다.
 
 auto_trade 차단 규칙: KIS 모의계좌는 게이트웨이 계정 하나를 모든 사용자가 같이 쓰므로, 어떤 사용자의 플랜이든
 is_active ∧ ¬dry_run 이면 broker=kis ∧ quant_mode=live 인 auto_trade(시스템 배치 포함)를 모두 끄고 다시 켜지 못하게 한다.
@@ -23,7 +23,7 @@ from app.services.brokers import stock_coin_trade_gateway as gateway
 
 logger = logging.getLogger(__name__)
 
-LIVE_EXECUTION_AVAILABLE = False      # 4단계(시분할 주문 실행)가 들어오면 True
+LIVE_EXECUTION_AVAILABLE = True       # 실제 모의주문 실행 승인(2026-10-23, 실제 계좌 dry-run 확인 후). False 면 Beat·수동 시작·dry_run=false 활성화를 모두 막는다
 MAX_TICKERS_LIMIT = 20                # st 잔고 연속조회가 생기기 전까지의 상한
 GATEWAY_MAX_ORDER_AMOUNT_PAPER = 10_000_000   # st KIS_PAPER_MAX_ORDER_AMOUNT 기본값
 DAILY_CANDLES = 60                    # Wilder ATR(14) 수렴용으로 넉넉히
@@ -296,7 +296,7 @@ async def set_active(db: AsyncSession, user_id: uuid.UUID, active: bool, dry_run
             raise StrategyError("목표 포트폴리오가 비어 있어 켤 수 없습니다.")
         if not dry_run:
             if not LIVE_EXECUTION_AVAILABLE:
-                raise StrategyError("주문 실행(4단계)이 아직 없어 dry-run 으로만 켤 수 있습니다.")
+                raise StrategyError("실제 모의주문 실행이 아직 승인되지 않았습니다. dry-run 으로만 켤 수 있습니다.")
             other = (await db.execute(select(StrategyPlan).where(StrategyPlan.is_active.is_(True), StrategyPlan.dry_run.is_(False),
                                                                 StrategyPlan.user_id != user_id).limit(1))).scalar_one_or_none()
             if other is not None:
