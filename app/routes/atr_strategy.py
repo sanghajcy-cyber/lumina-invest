@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
@@ -19,6 +20,7 @@ from app.services.atr_strategy import executor, planner
 from app.services.atr_strategy import service as svc
 
 router = APIRouter(prefix="/api/strategy/atr", tags=["atr-strategy"])
+logger = logging.getLogger(__name__)
 
 MAX_UPLOAD_BYTES = 1_000_000
 
@@ -114,6 +116,7 @@ async def dry_run(user=Depends(get_current_user_any), db: AsyncSession = Depends
         run = await svc.build_plan(db, _uid(user), "dry_run")
     except svc.StrategyError as exc:
         await db.rollback()
+        logger.warning("ATR 전략 dry-run 거부 user=%s: %s", user.get("id"), exc)
         raise HTTPException(409, str(exc))
     await db.commit()
     await db.refresh(run)
@@ -158,6 +161,7 @@ async def activate(body: ActivateBody = ActivateBody(), user=Depends(get_current
         return await svc.set_active(db, _uid(user), True, dry_run=body.dry_run)
     except svc.StrategyError as exc:
         await db.rollback()
+        logger.warning("ATR 전략 활성화 거부 user=%s dry_run=%s: %s", user.get("id"), body.dry_run, exc)
         raise HTTPException(409, str(exc))
 
 
@@ -180,6 +184,7 @@ async def rebalance_start(body: RebalanceStartBody = RebalanceStartBody(), user=
         run = await executor.start_rebalance(db, _uid(user), manual=True, force=body.force)
     except svc.StrategyError as exc:
         await db.rollback()
+        logger.warning("ATR 전략 /rebalance/start 거부 user=%s force=%s: %s", user.get("id"), body.force, exc)
         raise HTTPException(409, str(exc))
     return svc.run_to_dict(run)
 
@@ -202,5 +207,6 @@ async def rebalance_stop(user=Depends(get_current_user_any), db: AsyncSession = 
         run = await executor.stop_rebalance(db, _uid(user))
     except svc.StrategyError as exc:
         await db.rollback()
+        logger.warning("ATR 전략 /rebalance/stop 거부 user=%s: %s", user.get("id"), exc)
         raise HTTPException(409, str(exc))
     return svc.run_to_dict(run)

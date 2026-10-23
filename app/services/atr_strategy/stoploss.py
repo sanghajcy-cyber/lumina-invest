@@ -12,7 +12,8 @@ Beat `strategy.stop_loss_watch` 가 거래일 09:05~15:15 매분 호출한다. �
 손절 매도는 risk_guard 일손실 한도·일 주문 수·쿨다운과 전략 일 주문 수 한도에 막히지 않는다.
 같은 종목에 손절 주문이 열려 있거나 체결 확인 대기 중이면 새 손절을 내지 않는다. 같은 날 실패가 MAX_STOP_FAILURES 번이면 멈추고 알린다.
 게이트웨이 409 ORDER_IN_PROGRESS(다른 주문 처리 중)는 실패로 세지 않고 새 clientOrderId 로 재시도하고,
-429 RATE_LIMITED 는 실패로 세지 않고 다음 감시에서 이어서 한다.
+429 RATE_LIMITED·EGW00215(KIS 원장 초당 거래건수 초과)는 실패로 세지 않고 다음 감시에서 이어서 한다.
+4) 장부 평균가를 KIS 매입평균가로 맞춘다(sync_avg_with_account — 계좌 보유가 전부 전략 몫일 때만).
 """
 from __future__ import annotations
 
@@ -61,13 +62,17 @@ async def apply_stop_fills(repo: ex.Repo, plan: StrategyPlan) -> int:
         lo = await repo.live_order(ev.live_order_id) if ev.live_order_id else None
         if lo is None:
             continue
-        delta = int(lo.filled_quantity or 0) - int(ev.filled_qty or 0)
-        if delta > 0:
+        old, new = int(ev.filled_qty or 0), int(lo.filled_quantity or 0)
+        if new > old:
+            if not await repo.claim_fill(ev, old, new):
+                await repo.refresh(ev)      # 다른 프로세스가 이미 반영했다
+                continue
             price = float(lo.avg_filled_price or 0) or float(lo.price or 0) or float(ev.trigger_price or 0)
-            await ex.apply_fill(repo, plan, ev.symbol, ev.name, "SELL", delta, price)
-            ev.filled_qty = int(lo.filled_quantity)
+            ev.filled_qty = new
             ev.avg_fill_price = price
-            applied += delta
+            await ex.apply_fill(repo, plan, ev.symbol, ev.name, "SELL", new - old, price)
+            await repo.commit()
+            applied += new - old
         if lo.status in _STOP_TERMINAL:
             ev.status = "filled" if ev.filled_qty >= ev.quantity else _STOP_TERMINAL[lo.status]
             if ev.status == "failed" and not ev.reason:
@@ -92,7 +97,7 @@ async def sync_ledger_with_account(repo: ex.Repo, plan: StrategyPlan, account_qt
     adjustments = []
     open_sells = {o.symbol for o in await repo.open_rebalance_orders(plan.user_id) if o.side == "SELL"}
     open_sells |= {o.symbol for o in await repo.open_stop_orders(plan.user_id)}
-    for pos in await repo.positions(plan):
+    for pos in await repo.positions(plan, lock=True):   # 리밸런싱 tick 의 체결 반영과 겹쳐도 덮어쓰지 않게 잠근다
         q = int(pos.quantity or 0)
         if q <= 0 or pos.symbol in open_sells:
             continue
@@ -106,6 +111,45 @@ async def sync_ledger_with_account(repo: ex.Repo, plan: StrategyPlan, account_qt
         logger.warning("ATR 전략 장부 동기화(수동 매도로 판단) plan=%s %s", plan.id, a)
         await audit(str(plan.user_id), "", "strategy.atr_rebal.ledger_sync", a)
     return adjustments
+
+
+async def sync_avg_with_account(repo: ex.Repo, plan: StrategyPlan, holdings: dict[str, dict]) -> list[dict]:
+    """장부 평균가를 KIS 매입평균가(실제 체결 평균)로 맞춘다.
+
+    모의투자 체결 조회는 체결가를 주지 않아 장부는 주문 지정가(현재가+1틱)로 평균을 낸다. 계좌의 그 종목 보유가
+    전부 전략 몫이면 KIS 평균가가 정확하므로 그 값으로 맞춘다. 조건:
+      - 그 종목에 열린 주문(리밸런싱·손절)과 체결 미반영 회차·손절이 없다(체결 확인 중이면 수량이 아직 어긋날 수 있음)
+      - 계좌 수량 == 장부 수량이고, 계좌에 전략 밖 보유분이 섞인 적이 없다(account_mixed=False)
+    계좌 수량 > 장부 수량이면 전략 밖 보유분이 섞인 것이므로 account_mixed=True 로 표시한다(KIS 평균가는 매도해도 그대로라
+    이후 계좌 수량이 장부와 같아져도 맞추지 않는다). 계좌·장부 보유가 모두 0이 되면 표시를 푼다.
+    """
+    busy = {o.symbol for o in await repo.open_rebalance_orders(plan.user_id)}
+    busy |= {o.symbol for o in await repo.open_stop_orders(plan.user_id)}
+    busy |= {sl.symbol for sl in await repo.pending_slices(plan)}
+    busy |= {ev.symbol for ev in await repo.pending_stop_events(plan)}
+    changes = []
+    for pos in await repo.positions(plan, lock=True):
+        acct = holdings.get(pos.symbol) or {}
+        acct_qty, acct_avg = int(acct.get("quantity") or 0), float(acct.get("avgPrice") or 0)
+        q = int(pos.quantity or 0)
+        if q == 0:
+            if acct_qty == 0 and pos.account_mixed:
+                pos.account_mixed = False
+            continue
+        if pos.symbol in busy:
+            continue
+        if acct_qty > q:
+            if not pos.account_mixed:
+                pos.account_mixed = True
+                changes.append({"symbol": pos.symbol, "account_mixed": True, "account": acct_qty, "ledger": q})
+            continue
+        if acct_qty == q and not pos.account_mixed and acct_avg > 0 and abs(acct_avg - float(pos.avg_price or 0)) >= 0.5:
+            changes.append({"symbol": pos.symbol, "name": pos.name, "avg_before": round(float(pos.avg_price or 0), 2), "avg_after": acct_avg})
+            pos.avg_price = acct_avg
+    for c in changes:
+        logger.info("ATR 전략 장부 평균가 동기화 plan=%s %s", plan.id, c)
+        await audit(str(plan.user_id), "", "strategy.atr_rebal.ledger_avg_sync", c)
+    return changes
 
 
 async def _cancel_rebalance_orders(repo: ex.Repo, user_id: uuid.UUID, symbol: str) -> bool:
@@ -149,6 +193,11 @@ async def _execute_stop(repo: ex.Repo, plan: StrategyPlan, ev: StrategyStopEvent
         if res.get("status") == "submitted" or (lo is not None and lo.status == "UNKNOWN"):
             ev.status = "submitted"         # UNKNOWN: confirm_fills 가 멱등 재전송·확인
             return
+        if ex.is_ledger_busy(res.get("error")):
+            # EGW00215(원장 초당 거래건수 초과) — 실패로 세지 않고 다음 감시에서 이어서 한다(409·429 와 같게)
+            ev.status, ev.live_order_id = "waiting", None
+            ev.reason = "KIS 원장 초당 거래건수 초과(EGW00215) — 다음 감시에서 재시도"
+            return
         if res.get("code") == "RATE_LIMITED":
             # 분당 60회 한도 — 몇 초 재시도로는 풀리지 않는다. 실패로 세지 않고 다음 감시(1분 뒤)에서 이어서 한다.
             ev.status, ev.live_order_id = "waiting", None
@@ -177,12 +226,13 @@ async def watch_plan(repo: ex.Repo, plan: StrategyPlan, now: datetime) -> dict:
     await ex.sync_all_pending(repo, plan)
     await repo.flush()
     try:
-        bal = await gateway.get_balance()
+        bal = await ex.get_balance_shared(plan.environment)       # 리밸런싱 tick 과 잔고(원장 조회)를 공유
     except gateway.GatewayError as exc:
         await repo.commit()
         return {"skipped": f"잔고 조회 실패 [{exc.code}]"}
     account_qty: dict[str, int] = {}
     prices: dict[str, float] = {}
+    holdings: dict[str, dict] = {}
     for h in bal.get("holdings") or []:
         try:
             code = gateway.normalize_symbol(str(h.get("symbol") or ""))
@@ -190,12 +240,14 @@ async def watch_plan(repo: ex.Repo, plan: StrategyPlan, now: datetime) -> dict:
             continue
         account_qty[code] = int(h.get("quantity") or 0)
         prices[code] = float(h.get("currentPrice") or 0)
+        holdings[code] = h
     adjustments = await sync_ledger_with_account(repo, plan, account_qty)
-    await repo.flush()
+    avg_changes = await sync_avg_with_account(repo, plan, holdings)
+    await repo.commit()                 # 장부 잠금을 오래 들고 있지 않는다
 
     # 대상 = 장부 수량이 남은 모든 종목. 목표에서 빠진 종목도 매도가 끝날 때까지 감시한다. 장부에 없는 계좌 종목은 대상이 아니다.
     events = await repo.stop_events(plan, today)
-    out = {"adjustments": adjustments, "stops": []}
+    out = {"adjustments": adjustments, "avg_sync": avg_changes, "stops": []}
     for pos in await repo.positions(plan):
         sym = pos.symbol
         if int(pos.quantity or 0) <= 0:

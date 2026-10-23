@@ -151,29 +151,29 @@ def test_round_places_limit_plus_one_tick_and_does_not_repeat_within_round(env):
 def test_unfilled_order_is_cancelled_then_reordered_and_fills_go_to_ledger(env):
     e = env([_row("005930", 3, 50_000)], {"005930": {"price": 50_000, "open": 50_000}})
     start(e)
-    tick(e, at(9, 10))
+    tick(e, at(9, 10))                                                                  # 3주 → 주문 회차 09:10·11:05·13:00
     o1 = e.repo.orders[0]
-    tick(e, at(9, 15))                                                                  # 미체결 → 취소 → 재주문
+    assert e.repo.runs[0].rows[0]["slots_BUY"] == [0, 23, 46]
+    assert tick(e, at(9, 15))["processed"] == [] and o1.status == "ACCEPTED"           # 주문 회차가 아니면 열린 주문도 그대로
+    tick(e, at(11, 5))                                                                  # 다음 주문 회차: 미체결 → 취소 → 재주문
     assert o1.status == "CANCELLED" and o1.order_no in e.fb.cancelled and len(e.fb.placed) == 2
+    assert e.repo.orders[1].quantity == 2                                               # 남은 3주 ÷ 남은 주문 회차 2 → 2주
     o2 = e.repo.orders[1]
-    e.fb.fill(o2.order_no, 1)
-    tick(e, at(9, 20))
+    e.fb.fill(o2.order_no, 2)
+    tick(e, at(13, 0))
     pos = e.repo.positions_[0]
-    assert pos.quantity == 1 and pos.avg_price == 50_100                               # 장부 = 체결 수량·LIMIT 가
+    assert pos.quantity == 2 and pos.avg_price == 50_100                               # 장부 = 체결 수량·LIMIT 가
     e.fb.fill(e.repo.orders[2].order_no, 1)
-    tick(e, at(9, 25))
-    e.fb.fill(e.repo.orders[3].order_no, 1)
-    tick(e, at(9, 30))
-    assert e.repo.positions_[0].quantity == 3
-    assert tick(e, at(9, 35))["processed"] == []                                        # 목표 도달 → 더 내지 않는다
+    assert tick(e, at(13, 5))["processed"] == []
+    assert e.repo.positions_[0].quantity == 3                                           # 체결 반영 → 목표 도달 → 더 내지 않는다
 
 
 def test_cancel_not_confirmed_skips_round(env):
     e = env([_row("005930", 5, 50_000)], {"005930": {"price": 50_000, "open": 50_000}})
     start(e)
-    tick(e, at(9, 10))
+    tick(e, at(9, 10))                                                                  # 5주 → 다음 주문 회차 10:20
     e.fb.cancel_sticks.add(e.repo.orders[0].order_no)
-    out = tick(e, at(9, 15))
+    out = tick(e, at(10, 20))
     assert out["processed"][0]["status"] == "skipped" and "취소 확인 대기" in out["processed"][0]["reason"]
     assert len(e.fb.placed) == 1
 
@@ -200,8 +200,9 @@ def test_buy_band_skip_and_atr_missing_means_no_band(env):
     row = next(r for r in e.repo.runs[0].rows if r["symbol"] == "005930")
     assert (row["open"], row["band_low"], row["band_high"], row["band_skips"]) == (100_000, 99_000, 101_000, 1)
     e.fb.quotes["005930"]["price"] = 100_500
-    out = {p["symbol"]: p for p in tick(e, at(9, 15))["processed"]}
-    assert out["005930"]["status"] == "submitted"                                      # 다음 회차에 범위 안이면 산다
+    assert "005930" not in {p["symbol"] for p in tick(e, at(9, 15))["processed"]}      # 다음 주문 회차(10:20) 전에는 다시 보지 않는다
+    out = {p["symbol"]: p for p in tick(e, at(10, 20))["processed"]}
+    assert out["005930"]["status"] == "submitted"                                      # 다음 주문 회차에 범위 안이면 산다
 
 
 def test_open_price_missing_skips_buy(env):

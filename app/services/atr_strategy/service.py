@@ -8,6 +8,7 @@ is_active ∧ ¬dry_run 이면 broker=kis ∧ quant_mode=live 인 auto_trade(시
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import date, datetime, timezone
@@ -132,7 +133,14 @@ async def account_snapshot() -> tuple[float, dict[str, int]]:
     try:
         bal = await gateway.get_balance()
     except gateway.GatewayError as exc:
-        raise StrategyError(f"KIS 잔고 조회 실패: [{exc.code}] {exc}") from exc
+        if "EGW00215" not in str(exc):
+            raise StrategyError(f"KIS 잔고 조회 실패: [{exc.code}] {exc}") from exc
+        # 원장 초당 거래건수 초과 — 손절 감시·리밸런싱 tick 과 같은 초에 겹친 것. 잠시 뒤 1회 다시 조회한다.
+        await asyncio.sleep(1.5)
+        try:
+            bal = await gateway.get_balance()
+        except gateway.GatewayError as exc2:
+            raise StrategyError(f"KIS 잔고 조회 실패: [{exc2.code}] {exc2}") from exc2
     holdings: dict[str, int] = {}
     for h in bal.get("holdings") or []:
         try:

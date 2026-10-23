@@ -3,17 +3,22 @@
 Beat `strategy.rebalance_tick` 이 거래일 09:00~15:20 매분 호출한다. 한 번의 tick 은
   1) 오늘 리밸런싱 실행(StrategyRun kind=rebalance)이 없고 오늘이 첫 거래일이면 새로 시작, 있으면 **이어받는다**
   2) 장부에 체결을 반영한다(live_orders.filled_quantity − 회차가 이미 반영한 수량)
-  3) 현재 회차(5분 단위)에서 아직 처리하지 않은 종목을 매도 먼저, 최대 MAX_SYMBOLS_PER_TICK 개 처리한다
-     → 종목이 많으면 같은 회차 5분 안에 여러 tick 으로 나뉜다(게이트웨이 분당 60회 호출 예산)
+  3) 종목·방향마다 처음 할 일이 생긴 회차에 주문 회차 k = min(남은 회차, 남은 수량)개를 남은 매매 시간
+     (매수 ~14:55, 매도 ~14:30)에 고르게 배치하고(plan_slots, rows[].slots_BUY/SELL), 이번 회차가 그 주문 회차인 종목만
+     매도 먼저 최대 MAX_SYMBOLS_PER_TICK 개 처리한다 → 종목이 많으면 같은 회차 5분 안에 여러 tick 으로 나뉜다.
+     할 일이 없는 tick 은 잔고를 조회하지 않는다. 잔고는 손절 감시와 BALANCE_CACHE_SEC 동안 공유한다.
   4) 15:00 열린 주문 일괄 취소, 15:20 결과 확정
 종목 1개 처리 = 이전 회차의 열린 주문 취소·확인 → 장부 기준 남은 수량 재계산 → (매수) 위험관리·시가±ATR 범위 →
-회차 수량 = ceil(남은 수량 ÷ min(남은 회차, 남은 수량)) → LIMIT(매수 현재가+1틱 / 매도 현재가−1틱).
+회차 수량 = ceil(남은 수량 ÷ 남은 주문 회차 수) → LIMIT(매수 현재가+1틱 / 매도 현재가−1틱).
+주문 회차가 아닌 동안에는 열린 주문을 그대로 두고, 다음 주문 회차에 취소·재주문한다. EGW00215 는 1.5초 뒤 1회 재시도.
+체결 반영은 비교 후 갱신(claim_fill)과 장부 행 잠금으로 손절 감시와 동시에 돌아도 두 번 더하지 않는다.
 회차 기록(StrategySlice)을 주문 **전에** 남기고 커밋하므로, 주문 직후 프로세스가 죽어도 재시작 시 같은 회차를 다시 내지 않는다.
 
 DB 접근은 Repo 로 모았다(테스트는 메모리 구현으로 바꿔 끼운다).
 """
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import logging
@@ -22,7 +27,7 @@ import time as _time
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -51,6 +56,8 @@ STOP_TAG = "SL"                   # 손절 주문 태그 — 리밸런싱 취소
 MAX_SYMBOLS_PER_TICK = 4
 FINALIZE_AT = time(15, 20)
 LOCK_TTL_SEC = 55
+BALANCE_CACHE_SEC = 15            # 리밸런싱 tick 과 손절 감시가 잔고(원장 조회)를 이 시간 동안 공유한다
+LEDGER_BUSY_RETRY_SEC = 1.5       # EGW00215(원장 초당 거래건수 초과) 뒤 재시도 간격
 SYMBOL_LOCK_TTL_SEC = 50          # 리밸런싱 tick 과 손절 감시가 같은 종목을 동시에 건드리지 않게
 
 
@@ -104,6 +111,32 @@ def remaining_qty(row: dict, side: str, ledger_qty: int, account_qty: int) -> in
     return max(0, min(ledger_qty - target, min(ledger_qty, account_qty)))
 
 
+def plan_slots(seq: int, rounds_left: int, remaining: int) -> list[int]:
+    """남은 회차(seq 부터 rounds_left 개)에 주문 회차 k = min(남은 회차, 남은 수량)개를 고르게 배치한다.
+
+    예: 09:10(seq 0, 남은 70회)에 4주 → seq 0, 17, 35, 52 = 09:10, 10:35, 12:05, 13:30 (약 1시간 25분 간격).
+    """
+    k = min(rounds_left, remaining)
+    if k <= 0:
+        return []
+    return sorted({seq + (j * rounds_left) // k for j in range(k)})
+
+
+def slot_due(slots: list[int], seq: int, remaining: int) -> tuple[bool, int]:
+    """(이번 회차에 주문할지, 이번 회차를 포함한 남은 주문 회차 수).
+
+    마지막 주문 회차가 지났는데 남은 수량이 있으면(미체결·건너뜀) 이후 매 회차 따라잡는다.
+    """
+    if remaining <= 0 or not slots:
+        return False, 0
+    left = [x for x in slots if x >= seq]
+    if seq in slots:
+        return True, len(left)
+    if seq > max(slots):
+        return True, 1
+    return False, len(left)
+
+
 # ── 저장소 ──────────────────────────────────────────────────────────────
 
 
@@ -140,7 +173,9 @@ class Repo:
         return list((await self.db.execute(select(StrategySlice).where(StrategySlice.run_id == run.id))).scalars().all())
 
     async def live_order(self, order_id: uuid.UUID) -> LiveOrder | None:
-        return (await self.db.execute(select(LiveOrder).where(LiveOrder.id == order_id))).scalar_one_or_none()
+        # confirm_fills 등 다른 프로세스가 갱신한 체결 수량을 읽도록 세션 캐시를 덮어쓴다
+        stmt = select(LiveOrder).where(LiveOrder.id == order_id).execution_options(populate_existing=True)
+        return (await self.db.execute(stmt)).scalar_one_or_none()
 
     async def live_order_by_client_id(self, client_order_id: str) -> LiveOrder | None:
         return (await self.db.execute(select(LiveOrder).where(LiveOrder.client_order_id == client_order_id))).scalar_one_or_none()
@@ -153,9 +188,24 @@ class Repo:
             stmt = stmt.where(LiveOrder.symbol == symbol)
         return list((await self.db.execute(stmt)).scalars().all())
 
-    async def position(self, plan: StrategyPlan, symbol: str) -> StrategyPosition | None:
-        return (await self.db.execute(select(StrategyPosition).where(StrategyPosition.plan_id == plan.id,
-                                                                     StrategyPosition.symbol == symbol))).scalar_one_or_none()
+    async def position(self, plan: StrategyPlan, symbol: str, lock: bool = False) -> StrategyPosition | None:
+        stmt = select(StrategyPosition).where(StrategyPosition.plan_id == plan.id, StrategyPosition.symbol == symbol)
+        if lock:   # SELECT … FOR UPDATE — 다른 프로세스의 장부 갱신이 끝날 때까지 기다리고 최신 값을 읽는다
+            stmt = stmt.with_for_update().execution_options(populate_existing=True)
+        return (await self.db.execute(stmt)).scalar_one_or_none()
+
+    async def claim_fill(self, row, old: int, new: int) -> bool:
+        """회차·손절 기록의 반영 수량을 old → new 로 바꾼다(비교 후 갱신). 1행이 바뀐 쪽만 장부에 반영한다.
+
+        두 프로세스가 같은 체결을 동시에 반영하려 하면 한쪽 UPDATE 는 행 잠금을 기다렸다가 WHERE 가 맞지 않아 0행이 된다.
+        """
+        model = type(row)
+        res = await self.db.execute(update(model).where(model.id == row.id, model.filled_qty == old)
+                                    .values(filled_qty=new).execution_options(synchronize_session=False))
+        return res.rowcount == 1
+
+    async def refresh(self, obj) -> None:
+        await self.db.refresh(obj)
 
     async def ledger(self, plan: StrategyPlan) -> dict[str, dict]:
         return await svc.load_ledger(self.db, plan)
@@ -183,8 +233,11 @@ class Repo:
         return list((await self.db.execute(select(StrategyStopEvent).where(
             StrategyStopEvent.plan_id == plan.id, StrategyStopEvent.status.in_(("submitted", "planned"))))).scalars().all())
 
-    async def positions(self, plan: StrategyPlan) -> list[StrategyPosition]:
-        return list((await self.db.execute(select(StrategyPosition).where(StrategyPosition.plan_id == plan.id))).scalars().all())
+    async def positions(self, plan: StrategyPlan, lock: bool = False) -> list[StrategyPosition]:
+        stmt = select(StrategyPosition).where(StrategyPosition.plan_id == plan.id).order_by(StrategyPosition.symbol)
+        if lock:   # 종목 순서대로 잠가 다른 프로세스와 잠금 순서를 맞춘다
+            stmt = stmt.with_for_update().execution_options(populate_existing=True)
+        return list((await self.db.execute(stmt)).scalars().all())
 
     async def orders_placed_today(self, plan: StrategyPlan, day: date) -> int:
         stmt = (select(func.count(StrategySlice.id)).join(StrategyRun, StrategyRun.id == StrategySlice.run_id)
@@ -226,6 +279,51 @@ def lock_key(environment: str) -> str:
     return f"strategy:acct-lock:kis:{environment}"
 
 
+def is_ledger_busy(err) -> bool:
+    """KIS EGW00215(원장에서 허용 가능한 초당 거래건수 초과). st 는 HTTP 500 KIS_ERROR 로 메시지에 코드를 담아 돌려준다."""
+    return "EGW00215" in str(err or "")
+
+
+_balance_mem: dict[str, tuple[float, dict]] = {}
+
+
+async def get_balance_shared(environment: str, max_age: float | None = None) -> dict:
+    """게이트웨이 잔고를 max_age 초 동안 Redis 로 공유한다(원장 조회가 매분 정각에 몰려 EGW00215 가 나는 것을 줄인다).
+
+    EGW00215 면 LEDGER_BUSY_RETRY_SEC 뒤 1회 다시 조회한다. 실패하면 GatewayError 를 그대로 올린다.
+    """
+    max_age = BALANCE_CACHE_SEC if max_age is None else max_age
+    key = f"strategy:balance:kis:{environment}"
+    now = _time.time()
+    r = risk_guard._redis()
+    if r is not None:
+        try:
+            raw = await r.get(key)
+            if raw:
+                cached = json.loads(raw)
+                if now - float(cached.get("ts", 0)) <= max_age:
+                    return cached["balance"]
+        except Exception as exc:
+            logger.warning("잔고 공유 캐시 읽기 실패: %s", exc)
+    elif key in _balance_mem and now - _balance_mem[key][0] <= max_age:
+        return _balance_mem[key][1]
+    try:
+        bal = await gateway.get_balance()
+    except gateway.GatewayError as exc:
+        if not is_ledger_busy(exc):
+            raise
+        await asyncio.sleep(LEDGER_BUSY_RETRY_SEC)
+        bal = await gateway.get_balance()
+    if r is not None:
+        try:
+            await r.set(key, json.dumps({"ts": _time.time(), "balance": bal}, ensure_ascii=False), ex=int(max_age) + 5)
+        except Exception as exc:
+            logger.warning("잔고 공유 캐시 쓰기 실패: %s", exc)
+    else:
+        _balance_mem[key] = (_time.time(), bal)
+    return bal
+
+
 def symbol_lock_key(environment: str, symbol: str) -> str:
     return f"strategy:sym-lock:kis:{environment}:{symbol}"
 
@@ -255,7 +353,7 @@ async def release_symbol_lock(environment: str, symbol: str) -> None:
 async def apply_fill(repo: Repo, plan: StrategyPlan, symbol: str, name: str, side: str, qty: int, price: float) -> None:
     if qty <= 0:
         return
-    pos = await repo.position(plan, symbol)
+    pos = await repo.position(plan, symbol, lock=True)
     if pos is None:
         pos = StrategyPosition(plan_id=plan.id, symbol=symbol, name=name or "", quantity=0, avg_price=0.0, atr_source="none")
         repo.add(pos)
@@ -293,13 +391,17 @@ async def _sync_slices(repo: Repo, plan: StrategyPlan, slices: list[StrategySlic
         lo = await repo.live_order(sl.live_order_id)
         if lo is None:
             continue
-        delta = int(lo.filled_quantity or 0) - int(sl.filled_qty or 0)
-        if delta > 0:
+        old, new = int(sl.filled_qty or 0), int(lo.filled_quantity or 0)
+        if new > old:
+            if not await repo.claim_fill(sl, old, new):
+                await repo.refresh(sl)      # 다른 프로세스(손절 감시·리밸런싱 tick)가 이미 반영했다
+                continue
             price = float(lo.avg_filled_price or 0) or float(lo.price or 0)
-            await apply_fill(repo, plan, sl.symbol, lo.name, sl.side, delta, price)
-            sl.filled_qty = int(lo.filled_quantity)
+            sl.filled_qty = new
             sl.avg_fill_price = price
-            applied += delta
+            await apply_fill(repo, plan, sl.symbol, lo.name, sl.side, new - old, price)
+            await repo.commit()             # 체결 1건 = 짧은 트랜잭션(기록 행 → 장부 행 순서로 잠금) — 교착 방지
+            applied += new - old
         if lo.status in _TERMINAL_SLICE:
             sl.status = _TERMINAL_SLICE[lo.status] if not (lo.status == "CANCELLED" and sl.filled_qty) else "filled"
     return applied
@@ -357,6 +459,8 @@ async def _freeze_atr(repo: Repo, plan: StrategyPlan, rows: list[dict]) -> None:
             repo.add(pos)
         pos.atr = r.get("atr")
         pos.atr_source = r.get("atr_source") or "none"
+        if int(r.get("account_qty") or 0) > int(r.get("ledger_qty") or 0):
+            pos.account_mixed = True        # 계획 시점에 계좌에 전략 밖 보유분이 있었다(예: 직접 산 삼성전자 10주)
         pos.atr_as_of = date.fromisoformat(r["atr_as_of"]) if r.get("atr_as_of") else None
 
 
@@ -584,6 +688,16 @@ async def _process_symbol_locked(repo: Repo, plan: StrategyPlan, run: StrategyRu
         repo.db, None, sym, row.get("name") or sym, side.lower(), qty, float(lp), str(uid),
         source=LIVE_ORDER_SOURCE_ATR_REBAL, order_type="LIMIT", client_order_id=sl.client_order_id,
     )
+    if res.get("status") == "error" and is_ledger_busy(res.get("error")):
+        # EGW00215: 바로 실패로 닫지 않고 잠시 뒤 같은 tick 안에서 1회 재시도(새 clientOrderId — 첫 시도는 ERROR 행으로 남는다)
+        logger.info("ATR 전략 %s %s 회차 %d: EGW00215 — %.1f초 뒤 재시도", sym, side, seq, LEDGER_BUSY_RETRY_SEC)
+        await asyncio.sleep(LEDGER_BUSY_RETRY_SEC)
+        sl.client_order_id = gateway.make_client_order_id(uid, sym, side, now=now, tag=f"{REBAL_TAG}{sl.attempt}R", seq=seq)
+        await repo.commit()
+        res = await auto_trade._place_live_order_via_gateway(
+            repo.db, None, sym, row.get("name") or sym, side.lower(), qty, float(lp), str(uid),
+            source=LIVE_ORDER_SOURCE_ATR_REBAL, order_type="LIMIT", client_order_id=sl.client_order_id,
+        )
     lo = await repo.live_order_by_client_id(sl.client_order_id)
     sl.live_order_id = lo.id if lo is not None else None
     if res.get("status") == "submitted":
@@ -614,20 +728,6 @@ async def _resolve_interrupted(repo: Repo, run: StrategyRun) -> None:
 async def process_round(repo: Repo, plan: StrategyPlan, run: StrategyRun, now: datetime) -> dict:
     await _resolve_interrupted(repo, run)
     await sync_fills(repo, plan, run)
-    try:
-        bal = await gateway.get_balance()
-    except gateway.GatewayError as exc:
-        return {"skipped": f"잔고 조회 실패 [{exc.code}]"}
-    account_qty: dict[str, int] = {}
-    for h in bal.get("holdings") or []:
-        try:
-            account_qty[gateway.normalize_symbol(str(h.get("symbol") or ""))] = int(h.get("quantity") or 0)
-        except gateway.GatewayError:
-            continue
-    broker_row = await repo.broker_row(run.user_id)
-    equity = float(bal.get("totalEvalAmount") or 0)
-    ctx = {"account_qty": account_qty, "orders_today": await repo.orders_placed_today(plan, run.run_date),
-           "buy_block": await _buy_block_reason(plan, broker_row, equity), "cooldown_min": buy_cooldown_min(broker_row)}
 
     done = {(s.side, s.seq, s.symbol) for s in await repo.slices(run) if s.attempt == int(run.attempt or 0)}
     blocked = await stop_blocked_symbols(repo, plan, run.user_id, run.run_date)
@@ -647,15 +747,39 @@ async def process_round(repo: Repo, plan: StrategyPlan, run: StrategyRun, now: d
             if (side, seq, row["symbol"]) in done:
                 continue
             held = int((ledger.get(row["symbol"]) or {}).get("quantity") or 0)
-            # 같은 방향의 열린 주문이 있으면(미체결 재주문) 남은 수량이 0이어도 처리 대상 — 취소는 방향과 무관하게 종목 전체
-            has_open = any(o.side == side for o in await repo.open_rebalance_orders(run.user_id, row["symbol"]))
-            if remaining_qty(row, side, held, account_qty.get(row["symbol"], 0)) <= 0 and not has_open:
-                continue
-            todo.append((side, seq, rounds_left, row))
+            # 계좌 수량은 아직 모른다 — 매도 상한을 장부 수량으로 두고 할 일이 있는지만 본다(없으면 잔고를 조회하지 않는다)
+            rem = remaining_qty(row, side, held, held)
+            key = f"slots_{side}"
+            if rem > 0 and not row.get(key):
+                row[key] = plan_slots(seq, rounds_left, rem)          # 처음 할 일이 생긴 회차에 남은 매매 시간으로 고르게 배치
+            due, slots_left = slot_due(row.get(key) or [], seq, rem)
+            if not due:
+                continue                                            # 주문 회차가 아니면 열린 주문도 그대로 둔다
+            todo.append((side, seq, slots_left, row))
+
+    if not todo:
+        run.rows = rows
+        return {"processed": [], "deferred": 0, "idle": True}
+
+    try:
+        bal = await get_balance_shared(plan.environment)
+    except gateway.GatewayError as exc:
+        run.rows = rows
+        return {"skipped": f"잔고 조회 실패 [{exc.code}]"}
+    account_qty: dict[str, int] = {}
+    for h in bal.get("holdings") or []:
+        try:
+            account_qty[gateway.normalize_symbol(str(h.get("symbol") or ""))] = int(h.get("quantity") or 0)
+        except gateway.GatewayError:
+            continue
+    broker_row = await repo.broker_row(run.user_id)
+    equity = float(bal.get("totalEvalAmount") or 0)
+    ctx = {"account_qty": account_qty, "orders_today": await repo.orders_placed_today(plan, run.run_date),
+           "buy_block": await _buy_block_reason(plan, broker_row, equity), "cooldown_min": buy_cooldown_min(broker_row)}
 
     processed = []
-    for side, seq, rounds_left, row in todo[:MAX_SYMBOLS_PER_TICK]:
-        sl = await _process_symbol(repo, plan, run, row, side, seq, rounds_left, ctx, now)
+    for side, seq, slots_left, row in todo[:MAX_SYMBOLS_PER_TICK]:
+        sl = await _process_symbol(repo, plan, run, row, side, seq, slots_left, ctx, now)
         if sl is None:
             processed.append({"symbol": row["symbol"], "side": side, "seq": seq, "status": "deferred", "qty": 0, "reason": "손절 처리 중"})
             continue

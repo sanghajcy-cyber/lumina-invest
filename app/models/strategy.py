@@ -81,6 +81,9 @@ class StrategyPosition(Base, UUIDPkMixin, UpdatedAtMixin):
     atr: Mapped[float | None] = mapped_column(Float, nullable=True)          # 리밸런싱 날 고정, 다음 리밸런싱까지 유지
     atr_source: Mapped[str] = mapped_column(String(4), nullable=False, default="none")
     atr_as_of: Mapped[date | None] = mapped_column(Date, nullable=True)       # ATR 계산에 쓴 마지막 완성 일봉 날짜
+    # 계좌에 전략 밖 보유분이 섞인 적이 있으면 True. KIS 매입평균가는 매도해도 바뀌지 않는 평균법이라, 섞인 뒤에는
+    # 계좌 수량이 장부와 같아져도 KIS 평균가로 장부를 맞추면 안 된다. 계좌 보유가 0이 되면(KIS 평균가 초기화) False 로 돌아간다.
+    account_mixed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 
 class StrategyRun(Base, UUIDPkMixin, CreatedAtMixin, UpdatedAtMixin):
