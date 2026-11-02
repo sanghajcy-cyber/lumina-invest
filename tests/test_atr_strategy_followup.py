@@ -288,6 +288,35 @@ def test_orders_follow_slots_not_every_round(env):
     assert {p.symbol: p.quantity for p in e.repo.positions_} == {"005930": 4, "105560": 6}
 
 
+def test_cancel_wait_retries_next_round_not_next_slot(env):
+    """주문 회차가 '이전 회차 주문 취소 확인 대기'로 건너뛰어지면 다음 주문 회차(1시간 25분 뒤)가 아니라 5분 뒤에 다시 시도한다."""
+    e = env([_row("005930", 4, 200_000)], {"005930": {"price": 200_000, "open": 200_000}})
+    run(ex.start_rebalance(e.repo.db, UID, manual=True, now=at(9, 5), repo=e.repo))
+    run(ex.tick_plan(e.repo, e.plan, at(9, 10)))                       # 4주 → 주문 회차 09:10·10:35·12:05·13:30
+    o1 = e.repo.orders[0]
+    e.fb.cancel_sticks.add(o1.order_no)                                 # 취소 요청이 확인되지 않는다
+    out = run(ex.tick_plan(e.repo, e.plan, at(10, 35)))                 # 다음 주문 회차
+    assert out["processed"][0]["status"] == "skipped" and "취소 확인 대기" in out["processed"][0]["reason"]
+    assert e.repo.runs[0].rows[0]["retry_BUY"] is True
+    e.fb.cancel_sticks.clear()
+    out = run(ex.tick_plan(e.repo, e.plan, at(10, 40)))                 # 5분 뒤 — 주문 회차가 아니지만 다시 시도
+    assert out["processed"][0]["status"] == "submitted" and o1.status == "CANCELLED"
+    assert e.repo.orders[-1].quantity == 2                              # 남은 4주 ÷ (남은 주문 회차 2 + 건너뛴 1) → ceil 4/3 = 2
+    assert "retry_BUY" not in e.repo.runs[0].rows[0]
+    assert run(ex.tick_plan(e.repo, e.plan, at(10, 45)))["processed"] == []   # 재시도 후에는 다시 주문 회차를 따른다
+
+
+def test_cancel_wait_retry_keeps_trying_each_round_until_confirmed(env):
+    e = env([_row("005930", 4, 200_000)], {"005930": {"price": 200_000, "open": 200_000}})
+    run(ex.start_rebalance(e.repo.db, UID, manual=True, now=at(9, 5), repo=e.repo))
+    run(ex.tick_plan(e.repo, e.plan, at(9, 10)))
+    e.fb.cancel_sticks.add(e.repo.orders[0].order_no)
+    for t in (at(10, 35), at(10, 40), at(10, 45)):
+        out = run(ex.tick_plan(e.repo, e.plan, t))
+        assert out["processed"][0]["status"] == "skipped"              # 확인될 때까지 매 회차(5분) 다시 본다
+    assert len(e.fb.placed) == 1
+
+
 # ── F. 장부 평균가 · 계좌 혼합 ───────────────────────────────────────────
 
 
