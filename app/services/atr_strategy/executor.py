@@ -10,7 +10,8 @@ Beat `strategy.rebalance_tick` 이 거래일 09:00~15:20 매분 호출한다. �
   4) 15:00 열린 주문 일괄 취소, 15:20 결과 확정
 종목 1개 처리 = 이전 회차의 열린 주문 취소·확인 → 장부 기준 남은 수량 재계산 → (매수) 위험관리·시가±ATR 범위 →
 회차 수량 = ceil(남은 수량 ÷ 남은 주문 회차 수) → LIMIT(매수 현재가+1틱 / 매도 현재가−1틱).
-주문 회차가 아닌 동안에는 열린 주문을 그대로 두고, 다음 주문 회차에 취소·재주문한다. EGW00215 는 1.5초 뒤 1회 재시도.
+주문 회차가 아닌 동안에는 열린 주문을 그대로 두고, 다음 주문 회차에 취소·재주문한다. 단 주문 회차가 "이전 회차 주문 취소 확인 대기"로
+건너뛰어지면 다음 주문 회차까지 기다리지 않고 다음 회차(5분 뒤)에 다시 시도한다(rows[].retry_BUY/SELL). EGW00215 는 1.5초 뒤 1회 재시도.
 체결 반영은 비교 후 갱신(claim_fill)과 장부 행 잠금으로 손절 감시와 동시에 돌아도 두 번 더하지 않는다.
 회차 기록(StrategySlice)을 주문 **전에** 남기고 커밋하므로, 주문 직후 프로세스가 죽어도 재시작 시 같은 회차를 다시 내지 않는다.
 
@@ -644,7 +645,9 @@ async def _process_symbol_locked(repo: Repo, plan: StrategyPlan, run: StrategyRu
 
     for lo in await repo.open_rebalance_orders(uid, sym):
         if not await cancel_and_confirm(lo):
+            row[f"retry_{side}"] = True     # 다음 주문 회차까지 기다리지 않고 다음 회차(5분 뒤)에 다시 시도
             return skip("이전 회차 주문 취소 확인 대기")
+    row.pop(f"retry_{side}", None)
     await sync_fills(repo, plan, run)
     await repo.flush()
     ledger_qty = int(((await repo.ledger(plan)).get(sym) or {}).get("quantity") or 0)
@@ -756,6 +759,9 @@ async def process_round(repo: Repo, plan: StrategyPlan, run: StrategyRun, now: d
             if rem > 0 and not row.get(key):
                 row[key] = plan_slots(seq, rounds_left, rem)          # 처음 할 일이 생긴 회차에 남은 매매 시간으로 고르게 배치
             due, slots_left = slot_due(row.get(key) or [], seq, rem)
+            if not due and row.get(f"retry_{side}") and rem > 0:
+                # 지난 주문 회차가 "이전 회차 주문 취소 확인 대기"로 건너뛰어졌다 — 그 회차 몫을 이번 회차에서 다시 시도
+                due, slots_left = True, slots_left + 1
             if not due:
                 continue                                            # 주문 회차가 아니면 열린 주문도 그대로 둔다
             todo.append((side, seq, slots_left, row))
