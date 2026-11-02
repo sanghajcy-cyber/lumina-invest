@@ -215,3 +215,54 @@ reconcile(10분) ≈ 2 → 합계 ≈ 49 < 60. 6종목이면 59 로 여유가 �
 **다음**
 - main PR(이 브랜치). 남은 작업은 아래 "별도 작업 목록" 과 미결정(화면 시세 소스).
 - 12/1(화) 리밸런싱 전 목표 파일·투자금액 점검(`./atr.sh plan`, `./atr.sh dryrun`).
+
+## 운영 메모 (2026-11-02 인수인계)
+
+**현재 상태**
+- `main`(`8689b46`) 기준 이미지로 운영. `LIVE_EXECUTION_AVAILABLE=True`, DB(alembic) `0021`.
+- 플랜: you1@example.com, 실주문 모드(`is_active=true`, `dry_run=false`), 투자금액 5,000,000원, 목표 `portfolio_202611.csv.csv`
+  (삼성전자·KB금융·NAVER 동일비중, ATR 자동), 매수 범위 ATR×1, 손절 ATR×2(ATR 없으면 −10%), 종목 수 상한 20.
+- 장부: 삼성전자 7주(평균 214,500, `account_mixed=true` — 직접 산 몫이 섞였던 종목, KIS 평균가로 맞추지 않음),
+  NAVER 2주(175,600), KB금융 10주(152,645). ATR 은 11/2 고정값(기준일 10-30).
+- 연동: st 로컬(`~/github/stock-coin-trade`, `docker compose --profile local-db`), `crypto-mock-python` 은 shared-net,
+  lumina `.env` `STOCK_COIN_TRADE_BASE_URL=http://crypto-mock-python:8200`, st API 키 라벨 `lumina-autotrade-paper`(`scopes=kis:order`).
+
+**운영 도구** — `scripts/atr-ops/`(저장소 사본) = `~/atr-ops/`(실제 사용 위치). 비밀값 없음: 실행할 때 컨테이너 안에서
+you1@example.com 용 15분짜리 토큰을 발급해 API 를 부르고 토큰은 출력하지 않는다(대상 계정은 `atr_api.py` 의 `EMAIL`).
+`atr.sh` 는 자기 폴더의 `atr_api.py` 를 매번 컨테이너로 복사하고, `dryrun` 결과 `plan_*.csv` 를 같은 폴더에 남긴다 —
+저장소 사본으로 dryrun 하면 그 폴더에 CSV 가 생기므로 평소에는 `~/atr-ops/atr.sh` 를 쓴다.
+
+| 명령 | 용도 |
+|---|---|
+| `./atr.sh plan` | 설정·목표·장부 요약(읽기만) |
+| `./atr.sh invest <원>` | 투자금액만 변경 |
+| `./atr.sh upload <파일>` | 목표 파일(CSV/xlsx)로 목표 교체 — 주문 없음, 다음 리밸런싱에 반영 |
+| `./atr.sh dryrun` | 설정 변경 없이 오늘 기준 계획 → `plan_YYYYMMDD_HHMM.csv`, 종목별 예상 주문 시각 |
+| `./atr.sh today` | 오늘 리밸런싱 진행 상황 |
+| `./atr.sh start` | 수동 시작(첫 거래일이 아닐 때. 첫 거래일은 09:10 자동) |
+| `./atr.sh stop` | 오늘 리밸런싱 중지(열린 리밸런싱 주문 취소, 손절 감시는 계속) |
+| `./atr.sh kill` / `unkill` | 비상 정지 켜기/끄기(리밸런싱·손절 모두 멈춤, 열린 주문은 취소 안 함 → `stop` 먼저) |
+| `./atr.sh deactivate` | 전략 끄기(손절 감시도 멈춤, 응답 `warnings` 확인) |
+
+**확인 SQL**
+```bash
+P="docker exec fin-ai-postgres psql -U fin_user -d fin_ai -c"
+$P "select symbol, quantity, round(avg_price) avg, atr, atr_as_of, account_mixed from strategy_positions order by symbol"   # 장부
+$P "select run_date, trigger, status, attempt, summary->'result' from strategy_runs where kind='rebalance' order by run_date desc limit 3"
+$P "select to_char(created_at at time zone 'Asia/Seoul','MM-DD HH24:MI') t, symbol, side, seq, quantity, price, status, filled_qty, left(reason,50) from strategy_slices order by created_at desc limit 30"   # 회차
+$P "select to_char(created_at at time zone 'Asia/Seoul','MM-DD HH24:MI') t, symbol, side, order_type, quantity, status, filled_quantity from live_orders where source='ATR_REBAL' order by created_at desc limit 30"
+$P "select to_char(created_at at time zone 'Asia/Seoul','MM-DD HH24:MI') t, event_type, left(payload::text,120) from audit_events where event_type like 'strategy.%' order by created_at desc limit 30"   # ledger_sync(이중 반영 의심)·ledger_avg_sync·stop_loss
+docker logs -f --since 10m fin-ai-celery-worker-trading 2>&1 | grep -E "strategy\.|confirm_fills|ERROR|Traceback"
+```
+
+**남은 브랜치(로컬)**
+- `feat/atr-rebal-step5-stoploss`(`be1f845`, 원격에도 있음), `backup/main-before-rebase-20261102`(`3ca1c58`, 정리 전 main) — 12/1 리밸런싱 이후 삭제.
+- `feat/atr-rebal-step2-foundation`·`step3-plan-dryrun`·`step4-slicing` — 내용은 main 에 모두 있으나(`git cherry main <브랜치>` 미반영 패치 0개)
+  PR 때 커밋을 다시 올려 해시가 달라 `git branch -d` 가 거부한다. 지우려면 `git branch -D`.
+- `backup-before-sync`(`a9799df`) — 이 작업 이전부터 있던 브랜치, 확인 필요.
+
+**다음 할 일**
+1. 12/1(화) 자동 리밸런싱 확인 — 09:10 `trigger=auto` 시작, 회차 분산, 평균가 동기화, `ledger_sync` 0건, 15:20 `done`. 전날 `./atr.sh plan`·`dryrun` 점검.
+2. 매수 범위 배수(ATR×1) 유지 여부 관찰 — 11/2 NAVER 는 범위 밖으로 13회 건너뛰어 2/9 만 샀다. 몇 달 결과(`band_skips`)를 보고 배수 조정 판단.
+3. 목표 소스 자동화 — composite_v2 갱신 조사(`~/github/api-test1-project`) 후 `/api/quant/financials/screen` 상위 N개(동일비중)를
+   목표 소스로 연결(`strategy_plans.target_source='screen'` 자리만 있음).
