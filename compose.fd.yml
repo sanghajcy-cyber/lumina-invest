@@ -66,6 +66,24 @@ services:
       ollama:
         condition: service_started
 
+  celery-worker-trading:
+    image: lumina-invest-app:fd
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      QUANT_AGGRESSIVE_MODE: ${QUANT_AGGRESSIVE_MODE:-true}          # 5분봉 공격 모드 (2026-10-06). .env 로 끌 수 있다
+      KIS_PAPER_BATCH_ENABLED: ${KIS_PAPER_BATCH_ENABLED:-true}      # 로그인 무관 KIS 모의투자 배치. .env 로 끌 수 있다
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      ollama:
+        condition: service_started
+
   celery-beat:
     image: lumina-invest-app:fd
     environment:

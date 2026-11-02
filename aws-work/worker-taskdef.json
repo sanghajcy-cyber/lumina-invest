@@ -17,7 +17,7 @@
         "worker",
         "--loglevel=info",
         "--concurrency=2",
-        "--queues=celery"
+        "--queues=celery,trading"
       ],
       "secrets": [
         { "name": "DATABASE_URL",    "valueFrom": "arn:aws:secretsmanager:ap-northeast-2:086015456585:secret:lumina-invest/prod/app-c4WE2y:DATABASE_URL::" },

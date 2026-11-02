@@ -112,6 +112,13 @@ def beat_heartbeat() -> str:
     return write_heartbeat()
 
 
+@celery_app.task(name="beat.heartbeat_trading", time_limit=20, ignore_result=True)
+def beat_heartbeat_trading() -> str:
+    """trading 큐 워커 생존 신호. celery_app.task_routes 가 trading 큐로 보내므로 그 워커만 이 키를 갱신한다."""
+    from app.tasks.beat_health import write_heartbeat
+    return write_heartbeat(queue="trading")
+
+
 @celery_app.task(name="quant.auto_trade_cycle", time_limit=max(60, int(settings.QUANT_CYCLE_SEC) - 15))
 def quant_auto_trade_cycle() -> dict:
     """자동매매 활성 사용자 전원의 사이클 (Celery Beat, QUANT_CYCLE_SEC 기본 3분). time_limit 은 주기 안에 끝나도록 주기-15초."""

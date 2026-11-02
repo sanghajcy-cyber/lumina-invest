@@ -47,10 +47,25 @@ def bollinger(close: pd.Series, period: int = 20, std_mult: float = 2.0) -> tupl
     return mid + std_mult * std, mid, mid - std_mult * std
 
 
-def atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
+def atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14, method: str = "sma") -> pd.Series:
+    """평균 실제 범위. method='sma'는 TR 단순이동평균(기존 동작), 'wilder'는 Wilder 평활.
+
+    wilder: 전일 종가가 있는 TR(두 번째 봉부터)만 쓴다. 첫 값은 TR[1..period]의 평균(인덱스 period),
+    이후 ATR_t = (ATR_{t-1} × (period−1) + TR_t) / period. TA-Lib ATR 과 같은 규칙이다.
+    """
     prev_close = close.shift(1)
     tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
-    return tr.rolling(period).mean()
+    if method != "wilder":
+        return tr.rolling(period).mean()
+    values = tr.to_numpy(dtype=float)
+    out = np.full(len(values), np.nan)
+    if period >= 1 and len(values) > period:
+        prev = values[1:period + 1].mean()
+        out[period] = prev
+        for i in range(period + 1, len(values)):
+            prev = (prev * (period - 1) + values[i]) / period
+            out[i] = prev
+    return pd.Series(out, index=tr.index)
 
 
 def sharpe_ratio(returns: pd.Series, periods_per_year: int = 252) -> float:

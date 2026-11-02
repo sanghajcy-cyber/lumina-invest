@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.stock import get_quant_indicators, QUANT_STOCKS
 from app.database.postgres import get_session_factory
 from app.models import BrokerSettings, Order, Portfolio, QuantVirtualAccount, PORTFOLIO_BOOK_QUANT, LiveOrder, LIVE_ORDER_OPEN_STATUSES
+from app.models import LIVE_ORDER_SOURCE_MANUAL, LIVE_ORDER_SOURCE_QUANT_AUTO
 from app.models.base import SYSTEM_USER_ID
 from app.services import notification
 from app.services import strategy_loader
@@ -401,8 +402,18 @@ async def _place_live_order_via_gateway(
     quantity: int,
     price: float,
     user_id: str,
+    *,
+    source: str = LIVE_ORDER_SOURCE_QUANT_AUTO,
+    order_type: str | None = None,
+    order_tag: str = "",
+    order_seq: int | None = None,
+    client_order_id: str | None = None,
 ) -> dict:
     """stock-coin-trade 게이트웨이로 KIS 주문을 내고 live_orders 에 추적 행을 남긴다.
+
+    source 는 live_orders.source(주문 주체). order_type 을 주지 않으면 _live_order_type()(공격 모드/기본값).
+    order_tag·order_seq 는 clientOrderId 에 붙어, 같은 분에 같은 종목·방향 주문을 여러 번 내는 호출자를 구분한다.
+    client_order_id 를 주면 그 값을 그대로 쓴다 — 주문 전에 회차 기록을 먼저 남기는 호출자(ATR 전략)가 같은 키를 미리 정한다.
 
     실패해도 예외를 올리지 않는다(사이클 지속). 가상계좌 체결은 이미 끝났으므로 쿨다운 슬롯은 반납하지 않는다 —
     반납하면 다음 사이클에 가상 포지션이 중복으로 쌓인다. 실패는 알림 + live_orders.status=ERROR 로 남긴다.
@@ -417,22 +428,23 @@ async def _place_live_order_via_gateway(
         logger.warning("Redis 미연결(위험관리 메모리 폴백) — 실전 주문 생략 (%s %s x%d)", side, symbol, quantity)
         return {"status": "skipped", "broker": "kis", "via": "stock-coin-trade", "environment": env, "reason": "risk_store_unavailable"}
     try:
-        client_order_id = gateway.make_client_order_id(str(uid), symbol, side)
+        client_order_id = client_order_id or gateway.make_client_order_id(str(uid), symbol, side, tag=order_tag, seq=order_seq)
     except gateway.GatewayError as e:
         return {"status": "error", "broker": "kis", "via": "stock-coin-trade", "error": str(e)}
 
+    ot = (order_type or _live_order_type()).upper()
     row: LiveOrder | None = None
     if db is not None:
         row = LiveOrder(
             user_id=uid, client_order_id=client_order_id, environment=env, broker="kis",
-            symbol=symbol, name=name, side=side.upper(), order_type=_live_order_type(),
-            quantity=quantity, price=float(price), status="PENDING",
+            symbol=symbol, name=name, side=side.upper(), order_type=ot,
+            quantity=quantity, price=float(price), status="PENDING", source=source,
         )
         db.add(row)
         await db.commit()
 
     try:
-        result = await gateway.place_order(symbol, side, quantity, price, client_order_id=client_order_id, order_type=_live_order_type())
+        result = await gateway.place_order(symbol, side, quantity, price, client_order_id=client_order_id, order_type=ot)
     except gateway.GatewayError as e:
         logger.warning("게이트웨이 실주문 실패 (%s %s x%d): [%s] %s", side, symbol, quantity, e.code, e)
         if row is not None:
@@ -512,7 +524,8 @@ async def place_manual_kis_order(db: AsyncSession, user_id: str, symbol: str, na
     price = float(price)
 
     if gateway.is_configured():
-        result = await _place_live_order_via_gateway(db, broker_row, symbol, name or symbol, side, quantity, price, str(uid))
+        result = await _place_live_order_via_gateway(db, broker_row, symbol, name or symbol, side, quantity, price, str(uid),
+                                                     source=LIVE_ORDER_SOURCE_MANUAL)
     else:
         creds = await kis_credentials.get_credentials()
         if creds is None:
@@ -1096,12 +1109,25 @@ async def _run_once(user_id: str) -> None:
         _is_running = False
 
 
+class AutoTradeBlocked(Exception):
+    """같은 KIS 계좌를 쓰는 다른 전략이 실행 중이라 이 사용자의 실주문 자동매매를 켤 수 없음."""
+
+
 async def start_auto_trade(db: AsyncSession, user_id: str) -> bool:
-    """자동매매 활성화: DB 플래그 ON + 즉시 1회 사이클(백그라운드). 이후 주기 실행은 Celery Beat."""
+    """자동매매 활성화: DB 플래그 ON + 즉시 1회 사이클(백그라운드). 이후 주기 실행은 Celery Beat.
+
+    broker=kis ∧ quant_mode=live 인데 ATR 전략이 실주문 모드로 켜져 있으면 AutoTradeBlocked.
+    """
     global _auto_trade_task, _auto_trade_user_id
     uid = _resolve_user_id(user_id)
     if await is_enabled(db, uid):
         return False
+    from app.services.atr_strategy import service as atr_strategy   # 지연 import
+    reason = await atr_strategy.auto_trade_block_reason(db)
+    if reason:
+        row = (await db.execute(select(BrokerSettings).where(BrokerSettings.user_id == uid))).scalar_one_or_none()
+        if atr_strategy.is_live_kis_row(row):
+            raise AutoTradeBlocked(reason)
     await set_enabled(db, uid, True)
     _auto_trade_user_id = user_id or "quant_system"
     if not (_auto_trade_task and not _auto_trade_task.done()):
@@ -1139,10 +1165,23 @@ async def run_cycle_for_enabled_users() -> dict:
     """
     from app.services import kis_batch  # 지연 import (kis_batch → kis_quickstart → auto_trade 순환 방지)
 
+    from app.services.atr_strategy import service as atr_strategy   # 지연 import
+
     session_factory = get_session_factory()
     async with session_factory() as db:
+        blocked = None
         try:
-            batch = await kis_batch.ensure_system_batch(db)
+            blocked = await atr_strategy.auto_trade_block_reason(db)
+            if blocked:
+                await atr_strategy.force_off_live_kis_auto_trade(db, blocked)
+        except Exception as exc:   # 점검 실패가 사이클 전체를 막으면 안 된다 — 단, 실패를 기록한다
+            logger.exception("ATR 전략 차단 점검 실패: %s", exc)
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+        try:
+            batch = await kis_batch.ensure_system_batch(db, blocked_reason=blocked)
         except Exception as exc:  # 배치 점검 실패가 사용자 계정 사이클을 막으면 안 된다
             logger.exception("KIS 모의투자 배치 점검 실패: %s", exc)
             batch = {"enabled": kis_batch.is_configured(), "running": False, "error": str(exc)}
@@ -1159,4 +1198,4 @@ async def run_cycle_for_enabled_users() -> dict:
         except Exception:
             failed += 1
             logger.exception("자동매매 사이클 실패 user=%s", uid)
-    return {"enabled_users": len(uids), "ran": ran, "failed": failed, "kis_batch": batch}
+    return {"enabled_users": len(uids), "ran": ran, "failed": failed, "kis_batch": batch, "blocked_by_strategy": blocked}
