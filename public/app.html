@@ -1676,7 +1676,7 @@
           <!-- 검색 툴바: GET /api/quant/kis/orders (구분 봇/사용자 · 상태 · 방향 · 기간 · 텍스트 · 건수). 결과는 컬럼 헤더 클릭으로 정렬 -->
           <form id="kism-orders-form" class="flex flex-wrap items-end gap-2 text-xs mb-2" onsubmit="return false;">
             <label class="flex flex-col gap-1"><span style="color:var(--text-mute);">구분</span>
-              <select id="kism-o-owner" class="input text-xs" style="padding:4px 8px;"><option value="all">전체</option><option value="batch">봇(배치)</option><option value="me">사용자(내 계정)</option></select></label>
+              <select id="kism-o-owner" class="input text-xs" style="padding:4px 8px;"><option value="all">전체</option><option value="batch">봇(배치)</option><option value="strategy">ATR 전략</option><option value="me">사용자(내 계정)</option></select></label>
             <label class="flex flex-col gap-1"><span style="color:var(--text-mute);">상태</span>
               <select id="kism-o-status" class="input text-xs" style="padding:4px 8px;"><option value="">전체</option><option value="FILLED">FILLED</option><option value="ACCEPTED,PARTIALLY_FILLED,PENDING,CANCEL_REQUESTED">열린 주문</option><option value="ACCEPTED">ACCEPTED</option><option value="PARTIALLY_FILLED">PARTIALLY_FILLED</option><option value="PENDING">PENDING</option><option value="UNKNOWN,LOST,ERROR,REJECTED">미해결·실패</option><option value="UNKNOWN">UNKNOWN</option><option value="LOST">LOST</option><option value="ERROR">ERROR</option><option value="REJECTED">REJECTED</option><option value="CANCELLED">CANCELLED</option></select></label>
             <label class="flex flex-col gap-1"><span style="color:var(--text-mute);">방향</span>

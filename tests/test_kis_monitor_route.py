@@ -36,8 +36,8 @@ class FakeDb:
         raise AssertionError(entity)
 
 
-def order(symbol, side, qty, status, avg=None, price=100.0, age_min=10, user=SYSTEM_USER_ID, order_type="MARKET"):
-    return SimpleNamespace(user_id=user, client_order_id=f"c-{symbol}-{side}-{age_min}", environment="paper", symbol=symbol, name=symbol, side=side,
+def order(symbol, side, qty, status, avg=None, price=100.0, age_min=10, user=SYSTEM_USER_ID, order_type="MARKET", source="QUANT_AUTO"):
+    return SimpleNamespace(user_id=user, source=source, client_order_id=f"c-{symbol}-{side}-{age_min}", environment="paper", symbol=symbol, name=symbol, side=side,
                            order_type=order_type, quantity=qty, price=price, order_no="1", status=status,
                            filled_quantity=qty if status == "FILLED" else 0, avg_filled_price=avg, message="", created_at=NOW - timedelta(minutes=age_min))
 
@@ -94,7 +94,7 @@ def test_monitor_assembles_everything(client):
     assert [x["status"] for x in o["unresolved"]] == ["LOST"] and o["avg_slippage_pct"] == 0.3
     owners = {x["symbol"]: x["owner"] for x in o["recent"]}
     assert owners["005930.KS"] == "me" and owners["240810.KQ"] == "batch"
-    assert o["today_owner_counts"] == {"batch": 2, "me": 1}
+    assert o["today_owner_counts"] == {"batch": 2, "strategy": 0, "me": 1}
     assert {x["owner_label"] for x in o["recent"]} == {"봇(배치)", "사용자"}
     a = d["account"]
     assert a["connected"] and a["total"] == 10_500_000 and a["positions"] == 2 and a["bot_positions"] == 1
@@ -117,7 +117,7 @@ def test_monitor_without_gateway(client, monkeypatch):
 def test_orders_search_owner_status_side_text(client):
     """봇 실주문 그리드 검색: 구분·상태·방향·텍스트·페이지."""
     d = client.get("/api/quant/kis/orders").json()
-    assert d["total"] == 3 and len(d["rows"]) == 3 and d["counts_by_owner"] == {"batch": 2, "me": 1}
+    assert d["total"] == 3 and len(d["rows"]) == 3 and d["counts_by_owner"] == {"batch": 2, "strategy": 0, "me": 1}
     assert d["counts_by_status"] == {"FILLED": 1, "LOST": 1, "ACCEPTED": 1} and d["rows"][0]["symbol"] == "005930.KS"   # 최신순
     assert d["rows"][0]["owner_label"] == "사용자" and d["rows"][1]["owner_label"] == "봇(배치)"
     assert [r["owner"] for r in client.get("/api/quant/kis/orders?owner=batch").json()["rows"]] == ["batch", "batch"]
@@ -129,6 +129,19 @@ def test_orders_search_owner_status_side_text(client):
     assert client.get("/api/quant/kis/orders?q=c-240810").json()["total"] == 1                                       # clientOrderId
     page = client.get("/api/quant/kis/orders?limit=1&offset=1").json()
     assert page["total"] == 3 and [r["symbol"] for r in page["rows"]] == ["018290.KQ"]   # 최신순 2번째(20분 전)
+
+
+def test_atr_rebal_orders_are_labeled_strategy(client):
+    """source=ATR_REBAL 주문은 사용자 user_id 로 나가도 구분이 ATR 전략이고, 건수·구분 필터도 따로 센다."""
+    db = client.app.dependency_overrides[get_pg_session]()
+    db.orders.insert(0, order("105560.KS", "BUY", 4, "FILLED", avg=152_500, age_min=1, user=UID, order_type="LIMIT", source="ATR_REBAL"))
+    o = client.get("/api/quant/kis/monitor").json()["orders"]
+    assert o["recent"][0]["owner"] == "strategy" and o["recent"][0]["owner_label"] == "ATR 전략"
+    assert o["today_owner_counts"] == {"batch": 2, "strategy": 1, "me": 1}
+    d = client.get("/api/quant/kis/orders").json()
+    assert d["counts_by_owner"] == {"batch": 2, "strategy": 1, "me": 1}
+    assert [r["symbol"] for r in client.get("/api/quant/kis/orders?owner=strategy").json()["rows"]] == ["105560.KS"]
+    assert [r["symbol"] for r in client.get("/api/quant/kis/orders?owner=me").json()["rows"]] == ["005930.KS"]
 
 
 def test_orders_search_date_range_kst(client):

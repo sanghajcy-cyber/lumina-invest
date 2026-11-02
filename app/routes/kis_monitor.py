@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database.postgres import get_pg_session
 from app.lib.session import get_current_user
-from app.models import LiveOrder, Portfolio, PORTFOLIO_BOOK_QUANT
+from app.models import LiveOrder, Portfolio, PORTFOLIO_BOOK_QUANT, LIVE_ORDER_SOURCE_ATR_REBAL
 from app.models.base import SYSTEM_USER_ID
 from app.services import kis_batch, reconciliation
 from app.services.brokers import stock_coin_trade_gateway as gateway
@@ -57,12 +57,19 @@ def realized_pnl(rows: list) -> dict:
             "open_cost": {k: {"qty": v["qty"], "avg": round(v["cost"] / v["qty"], 2) if v["qty"] else None} for k, v in pos.items() if v["qty"] > 0}}
 
 
-OWNER_LABEL = {"batch": "봇(배치)", "me": "사용자"}
+OWNER_LABEL = {"batch": "봇(배치)", "strategy": "ATR 전략", "me": "사용자"}
 ORDER_STATUSES = ("PENDING", "ACCEPTED", "PARTIALLY_FILLED", "FILLED", "CANCEL_REQUESTED", "CANCELLED", "REJECTED", "UNKNOWN", "LOST", "ERROR")
 
 
 def _owner(r: LiveOrder) -> str:
+    # ATR 리밸런싱 주문은 전략 소유 사용자의 user_id 로 나가므로 source 로 먼저 가른다.
+    if getattr(r, "source", None) == LIVE_ORDER_SOURCE_ATR_REBAL:
+        return "strategy"
     return "batch" if r.user_id == SYSTEM_USER_ID else "me"
+
+
+def _owner_counts() -> dict[str, int]:
+    return {k: 0 for k in OWNER_LABEL}
 
 
 def _order_dict(r: LiveOrder) -> dict:
@@ -112,7 +119,7 @@ async def kis_monitor(limit: int = Query(50, ge=1, le=200), cycles: int = Query(
     day_start = now.astimezone(KST).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
     today = [r for r in rows if r.created_at and r.created_at.astimezone(timezone.utc) >= day_start]
     counts: dict[str, int] = {}
-    owner_counts: dict[str, int] = {"batch": 0, "me": 0}
+    owner_counts = _owner_counts()
     for r in today:
         counts[r.status] = counts.get(r.status, 0) + 1
         owner_counts[_owner(r)] += 1
@@ -214,7 +221,7 @@ def _kst_day_bounds(date_from: str, date_to: str) -> tuple[datetime | None, date
 
 @router.get("/orders")
 async def kis_orders(
-    owner: str = Query("all", pattern="^(all|batch|me)$", description="all | batch(봇·배치) | me(로그인 사용자)"),
+    owner: str = Query("all", pattern="^(all|batch|strategy|me)$", description="all | batch(봇·배치) | strategy(ATR 전략) | me(로그인 사용자 직접)"),
     status: str = Query("", max_length=200, description="쉼표 구분 상태 목록. 비우면 전체"),
     side: str = Query("", pattern="^(|BUY|SELL)$"),
     q: str = Query("", max_length=80, description="종목코드·종목명·주문번호·clientOrderId·메모 부분 일치(대소문자 무시)"),
@@ -230,7 +237,7 @@ async def kis_orders(
     me = uuid.UUID(str(user["id"]))
     if owner == "batch":
         owners = [SYSTEM_USER_ID]
-    elif owner == "me":
+    elif owner == "me":   # ATR 전략 주문도 같은 user_id 라 keep() 에서 구분으로 한 번 더 거른다
         owners = [me]
     else:
         owners = [me, SYSTEM_USER_ID] if me != SYSTEM_USER_ID else [me]
@@ -248,6 +255,8 @@ async def kis_orders(
 
     def keep(r: LiveOrder) -> bool:
         if r.user_id not in owners:
+            return False
+        if owner != "all" and _owner(r) != owner:
             return False
         created = r.created_at.astimezone(timezone.utc) if r.created_at else None
         if start and (created is None or created < start):
@@ -267,7 +276,7 @@ async def kis_orders(
     matched = sorted((r for r in rows if keep(r)),
                      key=lambda r: r.created_at.astimezone(timezone.utc) if r.created_at else datetime.min.replace(tzinfo=timezone.utc), reverse=True)
     counts_by_status: dict[str, int] = {}
-    counts_by_owner: dict[str, int] = {"batch": 0, "me": 0}
+    counts_by_owner = _owner_counts()
     for r in matched:
         counts_by_status[str(r.status)] = counts_by_status.get(str(r.status), 0) + 1
         counts_by_owner[_owner(r)] += 1

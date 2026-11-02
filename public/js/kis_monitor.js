@@ -144,17 +144,21 @@ function renderRecon(d) {
   updateGrid("kism-recon", [textColumn("type", "문제 유형", { width: 180 }), textColumn("symbol", "종목코드"), textColumn("values", "비교 값", { width: 300 }), textColumn("detail", "상세", { width: 300 })], rows, !r ? "점검 결과 없음" : r.ok === null ? "점검 불가" : "정합성 문제 없음");
 }
 
+const OWNER_LABEL = { batch: "봇(배치)", strategy: "ATR 전략", me: "사용자" };
+const OWNER_COLOR = { batch: "#6366f1", strategy: "#b45309", me: "#15803d" };
+const ownerCountText = oc => `봇 ${fmt(oc.batch ?? 0)} · ATR 전략 ${fmt(oc.strategy ?? 0)} · 사용자 ${fmt(oc.me ?? 0)}`;
+
 function renderOrdersSummary(d) {
   const note = document.getElementById("kism-orders-note"); if (!note) return;
   const o = d.orders || {}; const oc = o.today_owner_counts || {};
   const statusText = Object.entries(o.today_counts || {}).map(([k, v]) => `${k} ${v}`).join(", ") || "없음";
-  note.textContent = `· 당일 ${o.today_total ?? 0}건 (봇 ${oc.batch ?? 0} · 사용자 ${oc.me ?? 0}) · 상태 ${statusText}`;
+  note.textContent = `· 당일 ${o.today_total ?? 0}건 (${ownerCountText(oc)}) · 상태 ${statusText}`;
 }
 
 /* ── 실주문 검색 그리드: GET /api/quant/kis/orders ─────────────────────────────── */
 const ORDER_COLUMNS = [
   { ...timeColumn("created_at"), sort: "desc" },
-  textColumn("owner_label", "구분", { width: 115, cellRenderer: ({ data }) => textCell(data.owner_label || (data.owner === "batch" ? "봇(배치)" : "사용자"), data.owner === "batch" ? "#6366f1" : "#15803d") }),
+  textColumn("owner_label", "구분", { width: 115, cellRenderer: ({ data }) => textCell(data.owner_label || OWNER_LABEL[data.owner] || "사용자", OWNER_COLOR[data.owner] || OWNER_COLOR.me) }),
   textColumn("name", "종목", { width: 175, valueGetter: ({ data }) => data?.name || data?.symbol }), textColumn("symbol", "종목코드"),
   textColumn("side", "방향", { width: 110, cellRenderer: ({ value }) => textCell(value, value === "BUY" ? "#15803d" : "#dc2626") }),
   textColumn("order_type", "유형"), numericColumn("quantity", "주문수량"), numericColumn("filled_quantity", "체결수량"),
@@ -178,7 +182,7 @@ function sortedOrderRows() {
 function renderOrdersTable(resetPage = false) {
   const st = ordersState, result = document.getElementById("kism-orders-result");
   const oc = st.counts_by_owner || {}, statusText = Object.entries(st.counts_by_status || {}).map(([k, v]) => `${k} ${v}`).join(", ") || "없음";
-  if (result) result.textContent = `검색 결과 ${fmt(st.total)}건 (봇 ${fmt(oc.batch ?? 0)} · 사용자 ${fmt(oc.me ?? 0)}) · 상태 ${statusText} · 페이지당 10건${st.truncated ? " · 최근 2,000건까지만 검색" : ""}`;
+  if (result) result.textContent = `검색 결과 ${fmt(st.total)}건 (${ownerCountText(oc)}) · 상태 ${statusText} · 페이지당 10건${st.truncated ? " · 최근 2,000건까지만 검색" : ""}`;
   updateGrid("kism-orders", ORDER_COLUMNS, st.rows.map(r => ({ ...r, current_quantity: currentQuantity(r.symbol) })), "조건에 맞는 실주문이 없습니다.", resetPage);
 }
 export async function loadKisOrders({ resetPage = true } = {}) {
