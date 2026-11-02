@@ -14,7 +14,7 @@
 | 4 | 시분할 주문 실행(5분 회차)·15:00 일괄 취소·수동 시작/재실행/중지·이어받기 | 완료 (`feat/atr-rebal-step4-slicing`) |
 | 5 | 손절 감시·장부 동기화 | 완료 — 2026-10-23 실주문 승인(`026ef0f`)·첫 모의 운영 |
 | 6 | reconciliation 반영·화면·장 마감 결과 | 예정 |
-| 7 | `/api/quant/financials/screen` 상위 N개 연동 | 예정 |
+| 7 | `/api/quant/financials/screen` 상위 N개 연동 | 보류 (아래 "보류 작업") |
 
 ## 확정된 규칙
 
@@ -264,5 +264,47 @@ docker logs -f --since 10m fin-ai-celery-worker-trading 2>&1 | grep -E "strategy
 **다음 할 일**
 1. 12/1(화) 자동 리밸런싱 확인 — 09:10 `trigger=auto` 시작, 회차 분산, 평균가 동기화, `ledger_sync` 0건, 15:20 `done`. 전날 `./atr.sh plan`·`dryrun` 점검.
 2. 매수 범위 배수(ATR×1) 유지 여부 관찰 — 11/2 NAVER 는 범위 밖으로 13회 건너뛰어 2/9 만 샀다. 몇 달 결과(`band_skips`)를 보고 배수 조정 판단.
-3. 목표 소스 자동화 — composite_v2 갱신 조사(`~/github/api-test1-project`) 후 `/api/quant/financials/screen` 상위 N개(동일비중)를
-   목표 소스로 연결(`strategy_plans.target_source='screen'` 자리만 있음).
+3. 목표 파일 — 매달 사용자가 CSV 를 만들어 `./atr.sh upload <파일>` 로 올린다(첫 거래일 09:10 전). 목표 소스 자동화는 보류(아래).
+
+## 보류 작업 (2026-11-02 결정)
+
+**결정**: 목표 종목은 당분간 사용자가 매달 CSV 로 만들어 `./atr.sh upload` 로 올린다.
+composite_v2 월 갱신 자동화와 `target_source='screen'` 연동(7단계)은 보류. 아래는 재개할 때 쓸 조사 결과(2026-11-02, 읽기 전용).
+
+**현재 상태**
+- `/screen` 은 lumina 앱 DB(`fin-ai-postgres`, `fin_ai`)의 `factor_scores` 를 읽는다(`QUANT_DEFAULT_STRATEGY_VERSION=composite_v2`).
+  api-test1-project 의 적재 대상(`localhost:15432/fin_ai`)과 같은 DB·테이블이다.
+- DB composite_v2 는 77,782행·43개월(2023-01-31~**2026-07-31**), 07-31 점수 보유 568종목. `valuation_metrics` 는 2026-08-01 까지.
+- `/screen` 은 업종 구분 없이 `composite_score` 내림차순 상위 N개다. 연구 전략(CompositeTop20)은 같은 WICS 대분류 안 `composite_top_pct <= 20`(약 106종목)
+  이라 기준이 다르다 — 연동 재개 시 어느 쪽을 쓸지 정한다.
+- 주의: lumina 호스트용 `.env` 의 `DATABASE_URL=localhost:5432` 는 `crypto-mock-postgres` 다(컨테이너는 compose 의 `postgres:5432` 를 쓰므로 무관).
+
+**파이프라인 구조** (`~/github/api-test1-project`)
+1. 원본 수집: KRX 일별 시세 캐시(`main.py` `request_daily_stocks`) → `data/history/{월말}/market_data.parquet`(`rebuild_history_market_data_from_cache.py`),
+   WICS(`update_wics_sector.py --bas-dd`, WiseIndex 비공식) → `data/history/{월말}/mart/wics_sector.parquet`(`rebuild_wics_archives.py`),
+   공시 색인(`refresh_disclosure_index.py`), 재무 Tier0(OpenDART 일괄 ZIP → `update_all.py --year --period`), Tier2 정정 XBRL(`build_pit_tier2_xbrl_facts.py`).
+2. 월말 PIT 스냅샷: `build_monthly_pit_financial_snapshot.py` → `monthly_pit_financial_snapshot.parquet`(월 목록은 `data/history/*` 에서 정해짐).
+3. 재무 PIT 마트 → 밸류에이션 → EPS 성장 → PEG → WICS → value/growth/composite: `build_monthly_pit_scores_optimized.py`(전체 43개월 84분)
+   또는 월 단위 `run_scores_chunk_isolated.py --tag T --outdir ~/work/.. --months YYYY-MM,.. --run`(3개월 502초, 최대 7.5GB)
+   → `data/analysis/monthly_pit_scores_optimized.parquet`.
+4. DB 프레임: `src/etl_postgres/factor_scores_b5.build_factor_scores_v2_frame()`(as_of_date = 실제 월말 거래일).
+5. 적재: `scripts/refresh_factor_scores_v2.py --new .. --backup .. --new-sha .. --expect-add N [--apply]`(기본 dry-run, 백업·자동 복구,
+   새 프레임은 기존 키를 모두 포함해야 함).
+
+**07-31 에서 멈춘 이유**
+- 43개월(2023-01~2026-07) 고정 백테스트용 배치로 설계됐다. `rebuild_history_market_data_from_cache.py` 에 `EXPECTED_N_DATES=43`·`EXPECTED_LAST="2026-07-31"`
+  assert 가 있고, 스냅샷·점수 빌더는 기존 출력이 있으면 중단한다(덮어쓰기 금지).
+- 이후 월은 `forward_validation`(`run_forward_selection.py`, 첫 선정일 2026-09-30)으로 처리할 계획이었으나 한 번도 실행되지 않았고(`data/forward_validation/` 없음),
+  이 경로는 DB 에 적재하지 않는다. 2026-08 은 어느 쪽에도 없다. 10/18 DB 갱신은 같은 43개월의 재계산이었다. 스케줄러 없음.
+
+**재개하려면 (2026-10-30 까지 3개월 추가 기준)**
+- 추가 수집: KRX 2026-10-30(캐시가 10-29 까지), WICS 08-31·09-30·10-30, 공시 색인(10-12 까지 → 최신), Tier2 정정분(09-08 이후),
+  `disclosure_history_extended`(09-08 까지) 재생성. Tier0 2026/2Q 는 2,668종목으로 사용 가능.
+- 순서: 수집 → `data/history/2026{0831,0930,1030}/` 생성(기존 스크립트는 43개 assert 때문에 날짜 인자 사본/패치 필요) → 스냅샷 재생성(기존 파일 백업 후)
+  → `run_scores_chunk_isolated.py --months 2026-08,2026-09,2026-10 --run` → 운영 점수에 병합 → 프레임 → `refresh_factor_scores_v2.py` dry-run → `--apply`.
+- 예상: 점수 계산 약 10분, 수집은 공시 색인 갱신이 가장 길어 수십 분(추정). 단계별 승인·검증 시간이 더 든다.
+- 새 월은 `valuation_metrics` 짝(다음 달 1일)이 없어 `/screen` 의 per/pbr 이 null, `max_per` 필터를 쓰면 0건.
+- api-test1 18절(Tier2/PVI 복구안)이 보류 중이라, 나중에 채택하면 전체 재계산이 필요하다.
+- 매달 자동화하려면: 월 단위 증분 스크립트(날짜 하나로 history·WICS → 스냅샷 → 점수 → 병합 → 적재, 또는 `forward_validation/pit_pipeline.py` 에 적재 추가),
+  수집 작업 자동화, `refresh_factor_scores_v2.py` 의 수동 인자(`--new-sha`·`--expect-add`)를 대신할 자동 게이트, 마지막 거래일 장 마감 후~첫 거래일 09:10 전에
+  끝나는 스케줄, lumina 쪽 `as_of_date` 가 직전 월말이 아니면 리밸런싱 거부·경고.
